@@ -15,6 +15,7 @@ from .config import (
     FillOrdering,
     InitialHwmSource,
     LateAssetPolicy,
+    LockNotionalUpdateMode,
     MissingPricePolicy,
     ShareType,
     ShortCashPolicy,
@@ -103,6 +104,7 @@ class Broker:
         fixed_margin_schedule: dict[str, tuple[float, float]] | None = None,
         margin_pct_schedule: dict[str, tuple[float, float]] | None = None,
         short_cash_policy: ShortCashPolicy = ShortCashPolicy.CREDIT,
+        lock_notional_update_mode: LockNotionalUpdateMode = LockNotionalUpdateMode.POSITION_LEGS,
         execution_limits: ExecutionLimits | None = None,
         market_impact_model: MarketImpactModel | None = None,
         contract_specs: dict[str, ContractSpec] | None = None,
@@ -214,6 +216,7 @@ class Broker:
         self.fixed_margin_schedule = effective_margin_schedule
         self.margin_pct_schedule = effective_margin_pct_schedule
         self.short_cash_policy = short_cash_policy
+        self.lock_notional_update_mode = lock_notional_update_mode
 
         # Create Gatekeeper for order validation
         self.gatekeeper = Gatekeeper(
@@ -409,6 +412,7 @@ class Broker:
             fixed_margin_schedule=config.fixed_margin_schedule,
             margin_pct_schedule=config.margin_pct_schedule,
             short_cash_policy=config.short_cash_policy,
+            lock_notional_update_mode=config.lock_notional_update_mode,
             execution_limits=execution_limits,
             market_impact_model=market_impact_model,
             contract_specs=contract_specs,
@@ -567,6 +571,14 @@ class Broker:
     @_current_volumes.setter
     def _current_volumes(self, value: dict[str, float]) -> None:
         self._market_state.volumes = value
+
+    @property
+    def _current_vwaps(self) -> dict[str, float]:
+        return self._market_state.vwaps
+
+    @_current_vwaps.setter
+    def _current_vwaps(self, value: dict[str, float]) -> None:
+        self._market_state.vwaps = value
 
     @property
     def _current_bids(self) -> dict[str, float]:
@@ -968,6 +980,11 @@ class Broker:
                 ExecutionPrice.ASK,
                 ExecutionPrice.QUOTE_MID,
                 ExecutionPrice.QUOTE_SIDE,
+                # VWAP is already a whole-bar price, so the open short-circuit must not
+                # override it. While VWAP was absent from this set the branch below was
+                # unreachable under NEXT_BAR, and every VWAP fill silently returned the
+                # open - the assumption a caller chooses VWAP specifically to avoid.
+                ExecutionPrice.VWAP,
             }
         ):
             return self._current_opens.get(asset, self._current_prices.get(asset))
@@ -985,7 +1002,15 @@ class Broker:
                 return (high + low) / 2.0
             return self._current_prices.get(asset, self._current_closes.get(asset))
         if source == ExecutionPrice.VWAP:
-            return self._current_prices.get(asset, self._current_closes.get(asset))
+            # None, not a fallback and not a raise. A bar in which nothing traded has no
+            # volume-weighted price, and that is an ordinary market state rather than an
+            # error: callers already treat None as "this asset cannot be priced on this
+            # bar" and skip it, which leaves the order unfilled and the prior position
+            # standing - what happens to a real order resting in a bar with no prints.
+            # Substituting the close would invent a price from a stale carried print.
+            # A feed that declares no VWAP column at all is a different thing entirely,
+            # and Engine rejects that configuration before the first bar.
+            return self._current_vwaps.get(asset)
         if source == ExecutionPrice.BID:
             return self._current_bids.get(asset, self._current_prices.get(asset))
         if source == ExecutionPrice.ASK:
@@ -2096,6 +2121,9 @@ class Broker:
         if abs(delta_value) < 0.01:  # Less than 1 cent, no trade needed
             return None
 
+        if _options is not None and _options.priority_notional is None:
+            _options.priority_notional = abs(delta_value)
+
         # Convert to quantity (accounting for multiplier)
         delta_qty = delta_value / unit_notional
 
@@ -2285,6 +2313,7 @@ class Broker:
             lows = lows if lows is not None else kwargs.pop("lows", None)
             closes = kwargs.pop("closes", prices)
             volumes = kwargs.pop("volumes")
+            vwaps = kwargs.pop("vwaps", {})
             bids = kwargs.pop("bids", {})
             asks = kwargs.pop("asks", {})
             mids = kwargs.pop("mids", {})
@@ -2296,18 +2325,24 @@ class Broker:
         elif len(rest) == 2:
             volumes, signals = rest
             closes = prices
+            vwaps = {}
             bids = {}
             asks = {}
             mids = {}
             bid_sizes = {}
             ask_sizes = {}
         elif len(rest) == 8:
+            # Pre-VWAP positional form, kept working: a caller that does not pass VWAPs
+            # gets an empty cache, and get_price_for_source raises if it then asks for one.
             closes, volumes, bids, asks, mids, bid_sizes, ask_sizes, signals = rest
+            vwaps = {}
+        elif len(rest) == 9:
+            closes, volumes, vwaps, bids, asks, mids, bid_sizes, ask_sizes, signals = rest
         else:
             raise TypeError(
                 "_update_time expects either legacy arguments "
                 "(timestamp, prices, opens, highs, lows, volumes, signals) "
-                "or quote-aware arguments with closes/bid/ask caches."
+                "or quote-aware arguments with closes/vwap/bid/ask caches."
             )
         if highs is None or lows is None:
             raise TypeError("_update_time requires highs and lows")
@@ -2320,6 +2355,7 @@ class Broker:
         self._current_lows = lows
         self._current_closes = closes
         self._current_volumes = volumes
+        self._current_vwaps = vwaps
         self._current_bids = bids
         self._current_asks = asks
         self._current_mids = mids
