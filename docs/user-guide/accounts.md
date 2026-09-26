@@ -1,5 +1,8 @@
 # Account Policies
 
+The [accounts and constraints tutorial](../tutorials/accounts-and-constraints.md) compares
+accepted orders, structured rejections, and resulting portfolio state under each setting.
+
 Account policy determines what the broker is allowed to do with cash, leverage, and
 short sale proceeds. Use this page when you need to decide whether your strategy
 should behave like a long-only cash account, a short-enabled crypto-style account,
@@ -8,6 +11,8 @@ or a Reg T margin account.
 The configuration is intentionally simple: instead of switching between account
 "types", you set the policy flags directly and let the broker enforce the resulting
 buying-power rules.
+
+Run the linked accounts tutorial for complete order and portfolio-state comparisons under each policy.
 
 ## Quick Example
 
@@ -106,19 +111,53 @@ Common margin configurations:
 
 ## Using Engine Directly
 
-You can also pass account policy directly to `Engine`:
+Pass the account policy to `Engine` through `BacktestConfig`. This complete example
+submits a short sale on the first bar and checks its next-bar fill:
 
+<!-- ml4t-doc-test: account-engine-direct -->
 ```python
-from ml4t.backtest import Engine, DataFeed
+from datetime import datetime
 
-engine = Engine(
-    feed=feed,
-    strategy=strategy,
+import polars as pl
+from ml4t.backtest import BacktestConfig, DataFeed, Engine, OrderSide, Strategy
+
+
+class SellOnce(Strategy):
+    def __init__(self):
+        self.submitted = False
+
+    def on_data(self, timestamp, data, context, broker):
+        if not self.submitted:
+            broker.submit_order("AAPL", 10, OrderSide.SELL)
+            self.submitted = True
+
+
+prices = pl.DataFrame({
+    "timestamp": [datetime(2024, 1, 2), datetime(2024, 1, 3)],
+    "asset": ["AAPL", "AAPL"],
+    "open": [100.0, 100.0],
+    "high": [100.0, 100.0],
+    "low": [100.0, 100.0],
+    "close": [100.0, 100.0],
+    "volume": [10_000.0, 10_000.0],
+})
+
+config = BacktestConfig(
     initial_cash=100_000,
     allow_short_selling=True,
     allow_leverage=True,
     initial_margin=0.5,
 )
+engine = Engine(feed=DataFeed(prices_df=prices), strategy=SellOnce(), config=config)
+result = engine.run()
+
+assert [(fill.side.value, fill.quantity) for fill in result.fills] == [("sell", 10.0)]
+print("short sale filled: 10 AAPL")
+```
+
+<!-- ml4t-doc-output: account-engine-direct -->
+```text
+short sale filled: 10 AAPL
 ```
 
 ## Using Broker.from_config()
@@ -193,16 +232,27 @@ the retained comparison commands.
 
 ## Insufficient Funds
 
-Orders that exceed available buying power are rejected by the gatekeeper. Use this
-directly when you want to inspect why an order would fail:
+Use `Gatekeeper` directly when you need to validate an order before execution.
+It requires an account state, a commission model, and the expected fill price:
 
+<!-- ml4t-doc-test: account-gatekeeper -->
 ```python
-from ml4t.backtest.accounting import Gatekeeper
+from ml4t.backtest import Order, OrderSide
+from ml4t.backtest.accounting import AccountState, Gatekeeper, UnifiedAccountPolicy
+from ml4t.backtest.models import NoCommission
 
-gatekeeper = Gatekeeper(account_state, policy)
-is_valid, reason = gatekeeper.validate_order(order)
-if not is_valid:
-    print(f"Order rejected: {reason}")
+account = AccountState(initial_cash=100_000, policy=UnifiedAccountPolicy())
+gatekeeper = Gatekeeper(account, NoCommission())
+order = Order(asset="AAPL", side=OrderSide.BUY, quantity=1_500)
+is_valid, reason = gatekeeper.validate_order(order, price=100.0)
+
+assert not is_valid
+print(reason)
+```
+
+<!-- ml4t-doc-output: account-gatekeeper -->
+```text
+Insufficient cash: need $150000.00, have $100000.00
 ```
 
 ## Migration from the beta `account_type` keyword
@@ -224,20 +274,9 @@ The reviewed 0.1 compatibility snapshot is `tests/compatibility/snapshots/v0.1.j
 `uv run python validation/generate_compatibility_snapshot.py` to check it. An intentional API or
 schema change requires `--write` and review of the resulting snapshot diff.
 
-## See It in Action
+## In the book
 
-The [Machine Learning for Trading](https://github.com/stefan-jansen/machine-learning-for-trading)
-materials use account policy most clearly in these workflows:
-
-- **Ch16 case studies** — reusable `BacktestConfig` objects control cash use, leverage, and
-  portfolio behavior across equities, futures, crypto, and options examples
-- **Ch17** (`portfolio_construction`) — allocator comparisons depend on explicit account and
-  turnover assumptions instead of hidden notebook defaults
-- **Ch19** (`risk_management`) — leverage, shorting, and maintenance rules interact directly
-  with position sizing and portfolio limits
-
-Use the [Book Guide](../book-guide/index.md) when you want to jump from a notebook or
-case-study path to the production account-policy workflow.
+Chapter 17, Section 17.4, [Conformal position sizing](https://github.com/stefan-jansen/machine-learning-for-trading/blob/2d6e8f95eeccaee66906245606471f570b5807e5/17_portfolio_construction/07_conformal_position_sizing.ipynb) turns prediction uncertainty into position sizes. The account tutorial here shows how buying power and share precision affect those sizes.
 
 ## Next Steps
 

@@ -1,6 +1,10 @@
 # Market Impact & Execution Costs
 
+The [costs and funding tutorial](../tutorials/costs-and-funding.md) reconciles executed examples across all four cash-flow sources.
+
 Realistic backtesting requires modeling the costs of executing trades. ml4t-backtest provides three layers of cost modeling: commission, slippage, and market impact.
+
+Individual cost-model snippets assume a configured backtest and, where shown, an existing `result`. The linked costs tutorial runs complete gross-to-net comparisons.
 
 ## Cost Layers
 
@@ -45,7 +49,7 @@ config = BacktestConfig(
 )
 ```
 
-`PER_CONTRACT` is an alias for `PER_SHARE` — same math, clearer intent for futures.
+`PER_CONTRACT` is an alias for `PER_SHARE` - same math, clearer intent for futures.
 
 ### Custom Models
 
@@ -68,9 +72,21 @@ combined = CombinedCommission(
 )
 ```
 
+A custom commission model implements `calculate(asset, quantity, price)` and
+returns the fee for that quantity. The engine may call it before execution to
+estimate cash or margin requirements, then call it at the actual fill price.
+Only the fill-time value is charged. Estimates use a deep copy of the model,
+so a model that advances an internal volume tier on an executed fill does not
+advance it for a rejected or unfilled estimate. Custom models must support
+`deepcopy`, and `calculate` must not have external effects such as writing to a
+database or shared counter. A single fill that closes a position and opens
+its opposite is charged once for its full quantity. The fee is allocated between the closing
+and opening trade records in proportion to their quantities. Partial fills are
+charged separately when they execute.
+
 ## Slippage Models
 
-Slippage models the bid-ask spread you cross when executing. A buy order fills slightly above the mid-price; a sell order fills slightly below.
+Slippage adjusts the configured execution price in the adverse direction. Use the spread model for a bar-only estimate of bid-ask crossing, or a percentage or fixed amount for other execution drag.
 
 ### Percentage (Default)
 
@@ -129,7 +145,7 @@ synthetic spread slippage disabled unless you explicitly want additional impact.
 
 ## Market Impact Models
 
-Market impact captures the price movement caused by your order itself — large orders move the market. This is the most important cost for institutional-size strategies.
+Market impact models add an adverse price adjustment that depends on order size relative to reported volume. Calibrate the model parameters for the market and bar frequency you simulate.
 
 Import from `ml4t.backtest.execution`:
 
@@ -148,9 +164,10 @@ engine = Engine(feed, strategy, config)
 
 Price impact proportional to order size relative to bar volume:
 
-$$\text{impact} = \eta \times \frac{Q}{V}$$
+$$\Delta P = P \times \eta \times \frac{Q}{V}$$
 
-where $Q$ = order quantity, $V$ = bar volume, $\eta$ = impact coefficient.
+Here $P$ is the reference price, $Q$ is order quantity, $V$ is the bar volume, and
+$\eta$ is the configured coefficient. $\Delta P$ is added for buys and subtracted for sells.
 
 ```python
 from ml4t.backtest.execution import LinearImpact
@@ -172,11 +189,14 @@ answered wrongly. Model persistence outside the engine if you need it.
 
 ### Square-Root Impact
 
-The standard institutional model — impact scales with the square root of participation rate:
+This model scales the price adjustment with the square root of estimated daily-volume participation:
 
-$$\text{impact} = \eta \times \sigma \times \sqrt{\frac{Q}{V}}$$
+$$\Delta P = P \times \eta \times \sigma \times \sqrt{\frac{Q}{V \times a}}$$
 
-where $\sigma$ = daily volatility, $\eta$ = impact coefficient.
+Here $\sigma$ is the model's configured daily volatility and $a$ is
+`adv_factor`, the configured multiplier that converts bar volume into an
+estimated average daily volume. The defaults are $\sigma=0.02$ and $a=1.0$.
+The model does not estimate either value from the feed.
 
 ```python
 from ml4t.backtest.execution import SquareRootImpact
@@ -187,7 +207,9 @@ engine = Engine(
 )
 ```
 
-Square-root impact is the empirical consensus for equity markets (Almgren-Chriss, Barra).
+Both impact models return zero adjustment when bar volume is missing or zero.
+Calibrate their coefficients against observed execution costs before using them
+for performance estimates.
 
 ### Volume Participation Limits
 
@@ -203,6 +225,48 @@ engine = Engine(
 ```
 
 Orders exceeding 10% of bar volume are partially filled (the remainder stays pending).
+
+## Perpetual Futures Funding
+
+Pass a Polars frame to `Engine(..., funding_df=funding)`. Each row names a feed
+timestamp and asset, with either `rate` or `amount_per_unit`:
+
+```python
+from datetime import datetime
+import polars as pl
+
+funding = pl.DataFrame({
+    "timestamp": [datetime(2024, 1, 2, 8)],
+    "asset": ["BTC-PERP"],
+    "rate": [0.0001],
+})
+result = Engine(feed=feed, strategy=strategy, config=config,
+                funding_df=funding).run()
+payments = result.to_funding_dataframe()
+print(payments.select("timestamp", "asset", "cash_delta"))
+print(result.metrics["total_funding"])
+```
+
+A positive rate debits a long and credits a short. For a held position, the
+cash transfer is `-quantity * latest_price * contract_multiplier * rate`.
+Alternatively, `amount_per_unit` gives an account-currency amount per unit of
+underlying, multiplied by position quantity and contract multiplier. Negative
+values reverse the direction. Each row must provide exactly one of the two.
+
+Funding is applied after the bar's reference price becomes available and before
+orders eligible at that timestamp or the strategy callback run. A position
+opened at that timestamp does not pay that event. If the asset has no bar at
+the event, the latest earlier positive reference price is used. Events must
+match feed timestamps and known assets; duplicate, missing, or nonfinite
+values raise before the run. A rate event for a held position without a causal
+price raises before any payment at that timestamp changes cash.
+
+Funding is a separate cash flow, not a fill or trading fee. The result includes
+`funding.parquet`, `to_funding_dataframe()`, `total_funding`, and
+`num_funding_events`. Trading P&L
+and costs retain their existing definitions; terminal equity includes funding
+in addition to trading P&L. A scheduled event for a flat asset records zero
+cash transfer.
 
 ## Cost Impact Analysis
 
@@ -228,17 +292,13 @@ cost_drag = result_zero.metrics['total_return_pct'] - result_real.metrics['total
 print(f"Cost drag: {cost_drag:.2f}%")
 ```
 
-## See It in Action
+## In the book
 
-The [Machine Learning for Trading](https://github.com/stefan-jansen/machine-learning-for-trading) book demonstrates market impact in Ch18:
-
-- **Cost notebooks** — LinearImpact and SquareRootImpact models applied to multi-asset portfolios
-- **VolumeParticipationLimit** — preventing oversized orders in illiquid assets
-- **Cost drag analysis** — comparing gross vs net returns across case studies
+Chapter 18, Section 18.4, [Market impact calibration](https://github.com/stefan-jansen/machine-learning-for-trading/blob/2d6e8f95eeccaee66906245606471f570b5807e5/18_transaction_costs/03_market_impact_calibration.ipynb) examines how execution size changes impact. [Gross versus net performance](https://github.com/stefan-jansen/machine-learning-for-trading/blob/2d6e8f95eeccaee66906245606471f570b5807e5/18_transaction_costs/10_gross_vs_net_performance.ipynb) shows the portfolio effect of those costs.
 
 ## Next Steps
 
 - [Book Guide](../book-guide/index.md) -- where cost realism and quote-aware execution appear in the book
-- [Execution Semantics](execution-semantics.md) — fill timing, ordering, and stop modes
-- [Configuration](configuration.md) — all commission and slippage parameters
-- [Rebalancing](rebalancing.md) — how costs interact with weight-based rebalancing
+- [Execution Semantics](execution-semantics.md) - fill timing, ordering, and stop modes
+- [Configuration](configuration.md) - all commission and slippage parameters
+- [Rebalancing](rebalancing.md) - how costs interact with weight-based rebalancing

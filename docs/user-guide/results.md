@@ -1,5 +1,10 @@
 # Results & Analysis
 
+The [result export tutorial](../tutorials/results-and-analysis.md) joins a
+time-zone-aware feed to fills, equity, predictions, and funding, then checks a
+Parquet round trip. The [diagnostic handoff](../tutorials/diagnostic-handoff.md)
+uses the optional analysis package.
+
 `Engine.run()` returns a `BacktestResult` containing trades, equity curve, fills,
 portfolio state, and computed metrics. Everything is accessible as Python objects,
 Polars DataFrames, or Parquet files.
@@ -22,6 +27,8 @@ For reproducibility, `BacktestResult` also exposes:
   the rejected terminal state
 - `result.to_parquet(...)`, which writes `config.yaml`, `spec.yaml`, and `predictions.parquet`
   when available
+
+Snippets using `result` assume an existing `BacktestResult` from `Engine.run()`. The linked export tutorial supplies the complete run and checks each exported table.
 
 ## Metrics
 
@@ -456,9 +463,10 @@ result = engine.run()
 # One-liner bridge to ml4t-diagnostic
 analysis = portfolio_analysis_from_result(result, calendar="NYSE")
 
-# Now use PortfolioAnalysis methods
-print(f"Sharpe: {analysis.sharpe_ratio():.2f}")
-print(f"Max DD: {analysis.max_drawdown():.2%}")
+# Compute PortfolioAnalysis summary metrics
+stats = analysis.compute_summary_stats()
+print(f"Sharpe: {stats.sharpe_ratio:.2f}")
+print(f"Max DD: {stats.max_drawdown:.2%}")
 monthly = analysis.compute_monthly_returns()
 ```
 
@@ -489,8 +497,10 @@ analysis_net = portfolio_analysis_from_result(results_net, calendar="crypto")
 ```
 
 !!! note "Requires ml4t-diagnostic"
-    Install with `pip install ml4t-diagnostic`. The import is deferred so ml4t-backtest
-    works standalone without ml4t-diagnostic installed.
+    Add `ml4t-diagnostic==0.1.4` for portfolio analysis. The full HTML
+    tearsheet also requires the visualization extra:
+    `uv add 'ml4t-diagnostic[viz]==0.1.4'`. Backtest imports and runs
+    without this optional package.
 
 ### Trade Records
 
@@ -509,20 +519,35 @@ The bridge exports all cost decomposition fields (`gross_pnl`, `net_return`, `to
 
 ### Full Tearsheet
 
-Pass all result data for the richest tearsheet (up to 24 sections):
+Use the diagnostic integration function to build the HTML report from a
+complete Backtest result. This example uses the bundled synthetic equity panel
+and writes `tearsheet.html` in the current directory.
 
+<!-- ml4t-doc-test: guide-tearsheet -->
 ```python
-from ml4t.diagnostic.visualization.backtest import generate_backtest_tearsheet
+from pathlib import Path
 
-html = generate_backtest_tearsheet(
-    trades=result.to_trades_dataframe(),
-    returns=analysis.returns,
-    equity_curve=result.to_equity_dataframe(),
-    metrics=result.metrics,
-    template="full",
-    title="My Strategy — Full Report",
-    output_path="tearsheet.html",
+import polars as pl
+from ml4t.backtest import BacktestConfig, DataFeed, Engine
+from ml4t.backtest.example_data import ExampleRoundTrip, load_example_prices
+from ml4t.diagnostic.integration import generate_tearsheet_from_result
+
+prices = load_example_prices("equity").filter(pl.col("asset") == "AAPL")
+result = Engine(
+    DataFeed(prices_df=prices),
+    ExampleRoundTrip("AAPL", 100),
+    BacktestConfig(initial_cash=100_000),
+).run()
+html = generate_tearsheet_from_result(
+    result, title="AAPL example", template="full", output_path="tearsheet.html"
 )
+assert "<html" in html.lower()
+print(f"html_saved={Path('tearsheet.html').is_file()} fills={len(result.fills)}")
+```
+
+<!-- ml4t-doc-output: guide-tearsheet -->
+```text
+html_saved=True fills=2
 ```
 
 #### Metrics Keys That Enable Tearsheet Sections
@@ -550,13 +575,9 @@ print(result.config.describe())
 print(result.config.preset_name)
 ```
 
-## See It in Action
+## In the book
 
-The [Machine Learning for Trading](https://github.com/stefan-jansen/machine-learning-for-trading) book uses BacktestResult in every case study:
-
-- **Ch16 / NB05** (`performance_reporting`) — `portfolio_analysis_from_result()`, MFE/MAE analysis, gross vs net comparison, full 24-section tearsheet
-- **Ch16 case studies** — all cases save trade artifacts via `to_parquet()` and pass trades/metrics/equity to tearsheet generation
-- **Ch16 / NB06** (`sharpe_ratio_inference`) — statistical inference on backtest results
+Chapter 16, Section 16.5, [Performance reporting](https://github.com/stefan-jansen/machine-learning-for-trading/blob/2d6e8f95eeccaee66906245606471f570b5807e5/16_strategy_simulation/09_performance_reporting.ipynb) develops return and drawdown interpretation. This page defines the result frames and artifact format used to reproduce those reports.
 
 ## Next Steps
 

@@ -1,6 +1,6 @@
 # Configuration
 
-`BacktestConfig` is the single source of truth for all backtest behavior. Every behavioral difference between frameworks is a named parameter -- no subclassing or monkey-patching required.
+`BacktestConfig` records the execution and account settings used for a run. Named profiles choose settings for the supported comparison scenarios; they do not reproduce every behavior of another framework.
 
 It is also the canonical serializable backtest preset:
 
@@ -9,6 +9,8 @@ It is also the canonical serializable backtest preset:
 - persist the fully resolved snapshot from the executed result
 
 This keeps the input simple while still giving you an exact replayable record of what ran.
+
+Configuration snippets isolate individual settings and assume the named classes and enums have been imported. The [profiles tutorial](../tutorials/profiles-and-parity.md) runs a complete comparison with declared inputs.
 
 ## Creating a Config
 
@@ -514,15 +516,9 @@ config = BacktestConfig(
 
 Use this with a `DataFeed` whose `FeedSpec` maps `price_col`, `bid_col`, `ask_col`, and optionally quote sizes.
 
-## See It in Action
+## In the book
 
-The [Machine Learning for Trading](https://github.com/stefan-jansen/machine-learning-for-trading) book uses BacktestConfig across all case studies:
-
-- **Ch16 case studies** — each case study loads config from `setup.yaml` via `get_backtest_config()`, setting initial_cash, commission_rate, slippage_rate, and execution_mode
-- **Ch16 / NB13** (`futures_backtesting`) — ContractSpec with CommissionType.PER_CONTRACT for CME futures
-- **Ch19 case studies** — risk management config (stop fill modes, trailing stop timing)
-
-The book pattern: `BacktestConfig()` with 4 overrides (initial_cash, commission_rate, slippage_rate, execution_mode), loaded from YAML. Costs come from `setup.yaml` via a utility function. This covers the vast majority of use cases.
+Chapter 16, Section 16.3, [Engine divergence anatomy](https://github.com/stefan-jansen/machine-learning-for-trading/blob/2d6e8f95eeccaee66906245606471f570b5807e5/16_strategy_simulation/07_engine_divergence_anatomy.ipynb) changes one execution assumption at a time. Use this reference to identify and record the corresponding `BacktestConfig` fields.
 
 ## Next Steps
 

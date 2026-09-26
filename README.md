@@ -57,6 +57,10 @@ for supported setup paths.
 
 ## Quick Start
 
+The [first backtest](https://www.ml4trading.io/docs/backtest/getting-started/quickstart/)
+uses bundled synthetic data and explains every fill. The [tutorial sequence](https://www.ml4trading.io/docs/backtest/)
+then covers orders, multi-asset portfolios, costs, account rules, risk, and results.
+
 <!-- ml4t-doc-test: readme-quickstart -->
 ```python
 from datetime import datetime
@@ -312,19 +316,19 @@ The parity protocol disables transaction costs and position rules on both sides.
 
 | Real strategy | Pinned framework | Current result | Evidence |
 |---|---|---|---|
-| ETF allocation | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
+| ETF allocation | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | ETF allocation | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | ETF allocation | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | ETF allocation | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | ETF allocation | [LEAN 18001](https://github.com/QuantConnect/Lean) | fills equal at declared field precision; 1,995 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
-| CME futures | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | fills equal at declared field precision; 1,595 valuations within $0.01 (max raw gap $0.00000010); terminal within $0.01 (raw gap $0.00000007) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
+| CME futures | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | fills equal at declared field precision; 1,595 valuations within $0.01 (max raw gap $0.00000010); terminal within $0.01 (raw gap $0.00000007) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | CME futures | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | fills equal at declared field precision; 1,595 valuations within $0.01 (max raw gap $0.00000015); terminal within $0.01 (raw gap $0.00000015) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | Crypto perpetual funding | [LEAN 18001](https://github.com/QuantConnect/Lean) | fills equal at declared field precision; 2,426 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
-| FX allocation (USD-quoted pairs) | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | fills equal at declared field precision; 2,108 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
+| FX allocation (USD-quoted pairs) | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | fills equal at declared field precision; 2,108 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | FX allocation (USD-quoted pairs) | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | fills equal at declared field precision; 2,108 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | FX allocation (USD-quoted pairs) | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | fills equal at declared field precision; 2,108 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | FX allocation (USD-quoted pairs) | [LEAN 18001](https://github.com/QuantConnect/Lean) | fills equal at declared field precision; 2,108 valuations and terminal exact at 1e-8 | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
-| US equity panel | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | fills equal at declared field precision; 4,146 valuations within $0.01 (max raw gap $0.00001950); terminal within $0.01 (raw gap $0.00001880) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
+| US equity panel | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | fills equal at declared field precision; 4,146 valuations within $0.01 (max raw gap $0.00001950); terminal within $0.01 (raw gap $0.00001880) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | US equity panel | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | fills equal at declared field precision; 4,146 valuations within $0.01 (max raw gap $0.00001910); terminal within $0.01 (raw gap $0.00001870) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | US equity panel | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | fills equal at declared field precision; 4,146 valuations within $0.01 (max raw gap $0.00000170); terminal within $0.01 (raw gap $0.00000160) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
 | US equity panel | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | fills equal at declared field precision; 4,027 valuations within $0.01 (max raw gap $0.00000190); terminal within $0.01 (raw gap $0.00000030) | [real-strategy evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_RESULTS.json) |
@@ -336,25 +340,25 @@ The table reports engine-call wall time for all 17 correctness-passing pairs. Th
 
 | Real strategy | Pinned framework | Framework median (95% CI), s | ML4T median (95% CI), s | Framework / ML4T median |
 |---|---|---:|---:|---:|
-| ETF allocation | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 0.287 (0.286-0.289) | 0.415 (0.414-0.419) | 0.692x |
-| ETF allocation | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 0.171 (0.171-0.174) | 0.415 (0.413-0.417) | 0.412x |
-| ETF allocation | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 9.355 (9.303-9.424) | 0.430 (0.426-0.432) | 21.762x |
-| ETF allocation | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 3.872 (3.867-3.910) | 0.632 (0.628-0.638) | 6.127x |
-| ETF allocation | [LEAN 18001](https://github.com/QuantConnect/Lean) | 2.564 (2.487-2.599) | 0.750 (0.749-0.757) | 3.418x |
-| CME futures | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 0.286 (0.284-0.289) | 0.432 (0.429-0.435) | 0.663x |
-| CME futures | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 2.495 (2.488-2.526) | 0.429 (0.427-0.433) | 5.812x |
-| Crypto perpetual funding | [LEAN 18001](https://github.com/QuantConnect/Lean) | 2.801 (2.709-2.891) | 0.657 (0.655-0.661) | 4.266x |
-| FX allocation (USD-quoted pairs) | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 0.283 (0.281-0.286) | 0.146 (0.145-0.147) | 1.939x |
-| FX allocation (USD-quoted pairs) | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 0.139 (0.138-0.141) | 0.146 (0.145-0.147) | 0.952x |
-| FX allocation (USD-quoted pairs) | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 0.425 (0.420-0.432) | 0.146 (0.145-0.147) | 2.920x |
-| FX allocation (USD-quoted pairs) | [LEAN 18001](https://github.com/QuantConnect/Lean) | 0.913 (0.877-0.953) | 0.153 (0.152-0.157) | 5.952x |
-| US equity panel | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 0.795 (0.787-0.838) | 20.555 (20.486-20.600) | 0.039x |
-| US equity panel | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 16.995 (16.960-17.024) | 20.495 (20.453-20.534) | 0.829x |
-| US equity panel | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 495.553 (494.227-510.273) | 21.470 (21.386-21.543) | 23.082x |
-| US equity panel | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 107.609 (106.834-109.150) | 22.132 (22.082-22.234) | 4.862x |
-| US equity panel | [LEAN 18001](https://github.com/QuantConnect/Lean) | 47.683 (47.333-48.015) | 26.368 (26.222-26.473) | 1.808x |
+| ETF allocation | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 0.293 (0.290-0.298) | 0.424 (0.421-0.434) | 0.691x |
+| ETF allocation | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 0.192 (0.176-0.493) | 0.414 (0.413-0.417) | 0.462x |
+| ETF allocation | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 9.631 (9.428-9.710) | 0.439 (0.434-0.444) | 21.954x |
+| ETF allocation | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 3.888 (3.878-3.959) | 0.621 (0.618-0.626) | 6.256x |
+| ETF allocation | [LEAN 18001](https://github.com/QuantConnect/Lean) | 2.638 (2.516-2.707) | 0.750 (0.743-0.757) | 3.520x |
+| CME futures | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 0.290 (0.289-0.294) | 0.410 (0.406-0.958) | 0.708x |
+| CME futures | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 6.639 (5.831-8.332) | 0.428 (0.422-1.235) | 15.504x |
+| Crypto perpetual funding | [LEAN 18001](https://github.com/QuantConnect/Lean) | 2.828 (2.737-2.952) | 1.327 (0.657-2.183) | 2.131x |
+| FX allocation (USD-quoted pairs) | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 0.288 (0.286-0.294) | 0.148 (0.147-0.149) | 1.947x |
+| FX allocation (USD-quoted pairs) | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 0.144 (0.142-0.146) | 0.145 (0.145-0.146) | 0.988x |
+| FX allocation (USD-quoted pairs) | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 0.434 (0.430-0.440) | 0.147 (0.146-0.149) | 2.947x |
+| FX allocation (USD-quoted pairs) | [LEAN 18001](https://github.com/QuantConnect/Lean) | 0.953 (0.936-1.164) | 0.158 (0.155-0.164) | 6.033x |
+| US equity panel | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 3.806 (3.336-4.341) | 23.306 (21.906-25.833) | 0.163x |
+| US equity panel | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 17.116 (17.069-17.633) | 25.738 (24.983-27.163) | 0.665x |
+| US equity panel | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 668.611 (642.993-718.202) | 26.887 (26.406-29.406) | 24.868x |
+| US equity panel | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 117.445 (116.308-118.391) | 26.821 (25.473-27.644) | 4.379x |
+| US equity panel | [LEAN 18001](https://github.com/QuantConnect/Lean) | 48.436 (48.221-48.986) | 27.688 (27.575-27.796) | 1.749x |
 
-Measured 2026-09-03 on `Linux-6.8.0-138-generic-x86_64-with-glibc2.39` with 24 logical CPUs. Each side used one isolated warm-up process and ten isolated measured processes. The timer includes only the engine call; it excludes input loading, model inference, target construction, adapter preparation, result extraction, serialization, reporting. These measurements apply only to the named strategy, framework version, frozen input bundle, and machine. Raw samples and bootstrap intervals are retained in [real-strategy performance evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json).
+Measured 2026-09-24 on `Linux-6.8.0-139-generic-x86_64-with-glibc2.39` with 24 logical CPUs. Each side used one isolated warm-up process and ten isolated measured processes. The timer includes only the engine call; it excludes input loading, model inference, target construction, adapter preparation, result extraction, serialization, reporting. These measurements apply only to the named strategy, framework version, frozen input bundle, and machine. Raw samples and bootstrap intervals are retained in [real-strategy performance evidence](https://github.com/ml4t/backtest/blob/main/validation/REAL_STRATEGY_PERFORMANCE.json).
 
 ### Synthetic diagnostic scenarios
 
@@ -362,7 +366,7 @@ The scenario matrix contains synthetic conformance tests. "Exact" means terminal
 
 | Profile | Pinned framework | Required scenarios | Evidence |
 |---|---|---:|---|
-| `vectorbt_strict` | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 17/17 exact | [scenario evidence](https://github.com/ml4t/backtest/blob/main/validation/CORRECTNESS_RESULTS.json) |
+| `vectorbt_strict` | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 17/17 exact | [scenario evidence](https://github.com/ml4t/backtest/blob/main/validation/CORRECTNESS_RESULTS.json) |
 | `vectorbt_oss_strict` | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 16/16 exact | [scenario evidence](https://github.com/ml4t/backtest/blob/main/validation/CORRECTNESS_RESULTS.json) |
 | `backtrader_strict` | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 17/17 exact | [scenario evidence](https://github.com/ml4t/backtest/blob/main/validation/CORRECTNESS_RESULTS.json) |
 | `zipline_strict` | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 16/16 exact | [scenario evidence](https://github.com/ml4t/backtest/blob/main/validation/CORRECTNESS_RESULTS.json) |
@@ -371,7 +375,7 @@ The synthetic stress workload contains 250 assets and 5,040 daily sessions (1,26
 
 | Profile | Current framework | Target intents | Native fills | Fill-derived closed trades | Terminal value | Evidence |
 |---|---|---:|---:|---:|---:|---|
-| `vectorbt_strict` | [VectorBT Pro 2026.6.27](https://github.com/polakowo/vectorbt.pro) | 427,790 | 423,313 | 222,751 | 1,285,886.320000 | [scale evidence](https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json) |
+| `vectorbt_strict` | [VectorBT Pro 2026.6.27](https://vectorbt.pro/) | 427,790 | 423,313 | 222,751 | 1,285,886.320000 | [scale evidence](https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json) |
 | `vectorbt_oss_strict` | [VectorBT OSS 1.1.0](https://pypi.org/project/vectorbt/1.1.0/) | 427,790 | 417,941 | 211,322 | 1,345,348.850000 | [scale evidence](https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json) |
 | `backtrader_strict` | [Backtrader 1.9.78.123](https://pypi.org/project/backtrader/1.9.78.123/) | 427,790 | 343,813 | 182,019 | -9,166,273.560000 | [scale evidence](https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json) |
 | `zipline_strict` | [Zipline Reloaded 3.1.1](https://pypi.org/project/zipline-reloaded/3.1.1/) | 427,790 | 427,696 | 226,434 | 10,504,095.900000 | [scale evidence](https://github.com/ml4t/backtest/blob/main/validation/LARGE_SCALE_RESULTS.json) |
