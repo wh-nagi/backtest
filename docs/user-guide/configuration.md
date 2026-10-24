@@ -147,6 +147,17 @@ Account type is determined by the flag combination:
 | `execution_mode` | ExecutionMode | NEXT_BAR | When orders fill (SAME_BAR or NEXT_BAR) |
 | `execution_price` | ExecutionPrice | OPEN | Price used for market fills |
 | `mark_price` | ExecutionPrice | PRICE | Price used for open-position marking |
+| `next_bar_execution_price` | ExecutionPrice or None | None | Explicit deferred execution source; None preserves the native next-open rule |
+| `conditional_order_mode` | ConditionalOrderMode | BAR_OHLC | Extrema/level-based conditional orders, or EXECUTION_PRICE for triggers and fills on the selected observation |
+
+To execute an ordinary market order at the next observed bar's close, select
+`execution_mode=ExecutionMode.NEXT_BAR` and
+`next_bar_execution_price=ExecutionPrice.CLOSE`. The order remains deferred;
+changing this source does not move it to its decision bar. The default `None`
+retains existing next-open behavior, including existing quote/VWAP handling.
+Market-on-close orders retain their own close rule, and canonical opening-auction
+child intents continue to use the opening price. The option is persisted under
+`execution.next_bar_execution_price` in the resolved JSON/YAML configuration.
 
 Available `ExecutionPrice` values:
 
@@ -182,18 +193,18 @@ mark source.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `commission_type` | CommissionType | NONE | Model: NONE, PERCENTAGE, PER_SHARE, PER_TRADE, TIERED |
+| `commission_type` | CommissionType | NONE | Model: NONE, PERCENTAGE, PER_SHARE, PER_TRADE, TIERED, PER_ORDER_PER_SHARE, PER_ORDER |
 | `commission_rate` | float | 0.0 | Rate for percentage model |
 | `commission_per_share` | float | 0.0 | Dollar amount per share |
-| `commission_per_trade` | float | 0.0 | Dollar amount per trade |
-| `commission_minimum` | float | 0.0 | Minimum commission per trade |
+| `commission_per_trade` | float | 0.0 | Flat fee per fill for PER_TRADE; once per order for PER_ORDER |
+| `commission_minimum` | float | 0.0 | Per-fill minimum for PER_SHARE; cumulative order minimum for PER_ORDER_PER_SHARE/PER_ORDER |
 
 ### Slippage
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `slippage_type` | SlippageType | NONE | Model: NONE, PERCENTAGE, FIXED, SPREAD, VOLUME_BASED |
-| `slippage_rate` | float | 0.0 | Rate for percentage model |
+| `slippage_type` | SlippageType | NONE | Model: NONE, PERCENTAGE, FIXED, SPREAD, VOLUME_BASED, CUMULATIVE_VOLUME_SHARE |
+| `slippage_rate` | float | 0.0 | Percentage rate, or coefficient for the selected volume-impact model |
 | `slippage_fixed` | float | 0.0 | Fixed dollar amount per share |
 | `slippage_spread` | float | 0.0 | Spread in currency units for bar-only spread approximation |
 | `slippage_spread_by_asset` | dict[str, float] | `{}` | Optional per-asset spread overrides |
@@ -269,10 +280,60 @@ objects and executor mode behavior.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `calendar` | str \| None | None | Exchange calendar ("NYSE", "CME_Equity", "LSE", etc.) |
+| `calendar` | str \| None | omitted | Explicit name or `None`; omission inherits declared feed metadata, then NYSE. |
+| `time_contract_version` | int | 2 | Version 1 retains legacy null handling; version 2 distinguishes omission and explicit null. |
+| `periods_per_year` | float \| None | None | Optional positive finite return-period scale; observation mode defaults to 252. |
 | `timezone` | str | "UTC" | Timezone for naive datetimes |
 | `data_frequency` | DataFrequency | DAILY | Data frequency (DAILY, 1m, 5m, 15m, 30m, 1h) |
 | `enforce_sessions` | bool | False | Skip bars outside trading sessions |
+
+New Python configs use `time_contract_version=2`. Explicit `calendar=None` disables
+calendar handling, even when the feed declares an exchange. Omission inherits a declared
+feed calendar, including explicit null in a v2 `FeedSpec`; otherwise it resolves to NYSE.
+A named continuous calendar still defines a schedule and is not observation mode.
+Inspect `config.resolved_calendar` for the effective selection.
+When `config.feed_spec` leaves a calendar or other time field undeclared, the Engine inherits
+that field from the `DataFeed` metadata. A declaration in `config.feed_spec` takes precedence.
+With `enforce_sessions=True`, `event_time` and `bar_close` timestamps use actual session intervals;
+`session_label` timestamps use trading dates. Frequency supplies this distinction only when
+timestamp semantics are undeclared.
+
+<!-- ml4t-doc-test: calendar-selection-v2 -->
+```python
+from ml4t.backtest import BacktestConfig
+from ml4t.specs import FeedSpec
+
+metadata = FeedSpec(time_contract_version=2, calendar="CME_Equity")
+assert BacktestConfig(feed_spec=metadata).resolved_calendar == "CME_Equity"
+assert BacktestConfig(calendar=None, feed_spec=metadata).resolved_calendar is None
+assert BacktestConfig().resolved_calendar == "NYSE"
+print(BacktestConfig(feed_spec=metadata).resolved_calendar)
+print(BacktestConfig(calendar=None, feed_spec=metadata).resolved_calendar)
+print(BacktestConfig().resolved_calendar)
+```
+
+<!-- ml4t-doc-output: calendar-selection-v2 -->
+```text
+CME_Equity
+None
+NYSE
+```
+
+In observation mode, annualized metrics use 252 return periods per numerical year by
+default, regardless of timestamp spacing or `data_frequency`. This is a numerical
+convention, not a claim about exchange sessions. Set a positive finite `periods_per_year`
+to choose another scale; the override also survives config serialization. Calendar-free
+CAGR uses `(N - 1) / periods_per_year` years for `N` recorded equity values. A legacy payload without
+`calendar.time_contract_version` remains version 1, including its old null-as-inheritance
+behavior. Use `to_dict()` or `to_yaml()` to retain the v2 distinction between omission
+and explicit null; do not relabel an old payload without deciding what its null means.
+Direct result calls use the current selector contract: `result.to_daily_returns(calendar=None)`
+returns observations even when the result was built from a legacy configuration.
+
+Calendar v2 requires `ml4t-specs>=0.2.0`. The published
+[Specs 0.2.0](https://pypi.org/project/ml4t-specs/0.2.0/) package contains the versioned
+selector and serialization API. This is next-version Backtest behavior; the pending
+0.1.13 release candidate remains unchanged.
 
 ### Feed Contract
 
@@ -302,6 +363,8 @@ Supported keys mirror `FeedSpec`:
 - `bar_type`
 - `timestamp_semantics`
 - `session_start_time`
+- `time_contract_version`
+- `bar_grid_anchor`, `bar_label`, and `partial_bar_policy` (preserved v2 declarations)
 
 `session_start_time` can override an evening session boundary. Morning-start sessions use the
 local calendar date, so morning values must match the configured calendar's standard open.

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from numbers import Real
 from typing import TYPE_CHECKING
 
-from ..config import MissingPricePolicy
+from ..config import CancelPolicy, MissingPricePolicy
 from ..models import estimate_commission
 from ..types import ExecutionMode, Order, OrderSide, OrderStatus, OrderType, Position
 from .shared import SubmitOrderOptions, is_exit_order, quantity_zero_tolerance
@@ -16,6 +17,10 @@ if TYPE_CHECKING:
     from ..accounting import AccountState
     from ..broker import Broker
     from .fill_engine import FillEngine
+
+type SubmissionState = tuple[
+    object | None, float, dict[str, tuple[float, float]], dict[str, float | None] | None
+]
 
 
 class OrderBook:
@@ -45,6 +50,43 @@ class OrderBook:
         self._submission_shadow_bar: object | None = None
         self._submission_shadow_cash: float = 0.0
         self._submission_shadow_positions: dict[str, tuple[float, float]] = {}
+        self._submission_shadow_variation: dict[str, float | None] | None = None
+
+    def snapshot_submission_state(self) -> SubmissionState:
+        return (
+            self._submission_shadow_bar,
+            self._submission_shadow_cash,
+            dict(self._submission_shadow_positions),
+            dict(self._submission_shadow_variation)
+            if self._submission_shadow_variation is not None
+            else None,
+        )
+
+    def restore_submission_state(self, state: SubmissionState) -> None:
+        (
+            self._submission_shadow_bar,
+            self._submission_shadow_cash,
+            self._submission_shadow_positions,
+            self._submission_shadow_variation,
+        ) = state
+
+    @staticmethod
+    def _validate_prices(
+        order_type: OrderType, limit_price: float | None, stop_price: float | None
+    ) -> None:
+        for name, value, required in (
+            ("limit_price", limit_price, order_type in {OrderType.LIMIT, OrderType.STOP_LIMIT}),
+            ("stop_price", stop_price, order_type in {OrderType.STOP, OrderType.STOP_LIMIT}),
+        ):
+            if value is None and not required:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive price for {order_type.value}")
 
     def submit_order(
         self,
@@ -58,19 +100,40 @@ class OrderBook:
         options: SubmitOrderOptions | None = None,
     ) -> Order | None:
         broker = self.broker
+        self._validate_prices(order_type, limit_price, stop_price)
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, Real)
+            or not math.isfinite(quantity)
+        ):
+            raise ValueError("Order quantity must be a finite real number")
 
         if side is None:
-            if quantity == 0:
-                return None
-            side = OrderSide.BUY if quantity > 0 else OrderSide.SELL
+            side = OrderSide.BUY if quantity >= 0 else OrderSide.SELL
         quantity = abs(quantity)
         if quantity <= self._MIN_ORDER_SIZE:
-            return None
+            validate_zero = options is not None and options.validate_zero_quantity
+            if not validate_zero:
+                validate_zero = broker._requires_zero_order_validation()
+            if not validate_zero:
+                return None
 
         if asset in self.risk.stop_exits_this_bar:
             existing_pos = self.account.positions.get(asset)
             if existing_pos is None:
                 return None
+
+        control_request = broker._validate_trading_controls(
+            asset, quantity if side is OrderSide.BUY else -quantity
+        )
+        if quantity <= self._MIN_ORDER_SIZE:
+            return None
+        eligible_from, eligible_on_boundary = broker._preopen_order_eligibility()
+        submitted_session = (
+            broker._submission_session_date(validate_active=True)
+            if broker.cancel_policy is CancelPolicy.SESSION_END
+            else None
+        )
 
         self.orders.counter += 1
         order = Order(
@@ -94,11 +157,20 @@ class OrderBook:
             intent_idempotency_key=(
                 options.intent_idempotency_key if options is not None else None
             ),
+            _submitted_session_date=submitted_session,
+            _eligible_from=eligible_from,
+            _eligible_on_boundary=eligible_on_boundary,
         )
 
         order._signal_price = self.market.prices.get(asset)
 
         self.orders.orders.append(order)
+        if control_request is not None:
+            broker._commit_control_order(control_request)
+
+        if self.account.corporate is not None and asset in self.account.corporate.converted_assets:
+            order.reject("Instrument was converted by a corporate action", "instrument_converted")
+            return order
 
         # Immediate fill: same-bar market orders fill during submit_order()
         # instead of being queued for later _process_orders(). Each order
@@ -147,6 +219,7 @@ class OrderBook:
         broker = self.broker
         return (
             broker.immediate_fill
+            and broker._may_fill_immediately()
             and broker.execution_mode is ExecutionMode.SAME_BAR
             and order.order_type is OrderType.MARKET
             and order.child_intent_id is None
@@ -254,15 +327,42 @@ class OrderBook:
 
         for order in self.orders.pending:
             if order.order_id == order_id:
+                quantity = kwargs.get("quantity", self.fill_engine.get_effective_quantity(order))
+                if (
+                    isinstance(quantity, bool)
+                    or not isinstance(quantity, Real)
+                    or not math.isfinite(quantity)
+                    or quantity <= 0
+                ):
+                    raise ValueError("Updated remaining quantity must be finite and positive")
+                self.broker._validate_trading_controls(
+                    order.asset,
+                    quantity if order.side is OrderSide.BUY else -quantity,
+                    replacing_order_id=order_id,
+                )
+                self._validate_prices(
+                    order.order_type,
+                    kwargs.get("limit_price", order.limit_price),
+                    kwargs.get("stop_price", order.stop_price),
+                )
+                if "stop_price" in kwargs and kwargs["stop_price"] != order.stop_price:
+                    order._stop_triggered = False
+                    order._stop_triggered_at = None
                 for key, value in kwargs.items():
                     setattr(order, key, value)
+                if "quantity" in kwargs and order_id in self.orders.partial_quantities:
+                    self.orders.partial_quantities[order_id] = quantity
                 return True
         return False
 
-    def cancel_order(self, order_id: str) -> bool:
+    def cancel_order(
+        self, order_id: str, *, timestamp: datetime | None = None, reason: str = "user"
+    ) -> bool:
         for order in self.orders.pending:
             if order.order_id == order_id:
                 order.status = OrderStatus.CANCELLED
+                order.cancelled_at = timestamp if timestamp is not None else self.market.time
+                order.cancellation_reason = reason
                 self.orders.pending.remove(order)
                 self.orders.partial_quantities.pop(order_id, None)
                 return True
@@ -290,7 +390,13 @@ class OrderBook:
     def _reset_submission_shadow_if_needed(self) -> None:
         broker = self.broker
         ts = self.market.time
-        bar_key = ts.date() if ts is not None else None
+        bar_key = (
+            self.market.bar_index
+            if self.account.futures_methods is not None
+            else ts.date()
+            if ts is not None
+            else None
+        )
         if bar_key == self._submission_shadow_bar:
             return
 
@@ -306,6 +412,15 @@ class OrderBook:
             for asset, pos in self.account.positions.items()
             if abs(pos.quantity) > quantity_zero_tolerance(pos.quantity)
         }
+        self._submission_shadow_variation = (
+            {
+                asset: pos.variation_basis
+                for asset, pos in self.account.positions.items()
+                if asset in self.account.futures_methods
+            }
+            if self.account.futures_methods is not None
+            else None
+        )
 
     def _build_shadow_policy_positions(self) -> dict[str, Position]:
         broker = self.broker
@@ -322,6 +437,11 @@ class OrderBook:
                 current_price=mark_price,
                 entry_time=ts,
                 multiplier=broker.get_multiplier(asset),
+                variation_basis=(
+                    self._submission_shadow_variation.get(asset)
+                    if self._submission_shadow_variation is not None
+                    else None
+                ),
             )
         return positions
 
@@ -372,11 +492,13 @@ class OrderBook:
 
         self._reset_submission_shadow_if_needed()
 
-        if broker.allow_leverage and not broker.next_bar_simple_cash_check:
+        variation = order.asset in (self.account.futures_methods or {})
+        if broker.allow_leverage and (not broker.next_bar_simple_cash_check or variation):
             return self._passes_margin_submission_precheck(
                 order,
                 signal_price,
-                commit=not broker.next_bar_queue_shadow_validation,
+                commit=not broker.next_bar_queue_shadow_validation
+                and not (variation and broker.buying_power_reservation),
             )
 
         size = order.quantity if order.side is OrderSide.BUY else -order.quantity
@@ -393,7 +515,12 @@ class OrderBook:
         if opened != 0.0:
             shadow_cash -= opened * signal_price
         shadow_cash -= estimate_commission(
-            broker.commission_model, order.asset, order.quantity, signal_price
+            broker.commission_model,
+            order.asset,
+            order.quantity,
+            signal_price,
+            order=order,
+            multiplier=broker.get_multiplier(order.asset),
         )
 
         # Keep shadow effects even for rejected orders to mirror Backtrader's
@@ -453,6 +580,9 @@ class OrderBook:
 
         self._reset_submission_shadow_if_needed()
 
+        if order.asset in (self.account.futures_methods or {}):
+            return self._passes_margin_submission_precheck(order, signal_price)
+
         size = order.quantity if order.side is OrderSide.BUY else -order.quantity
         old_qty, old_price = self._submission_shadow_positions.get(order.asset, (0.0, signal_price))
         new_qty, new_price, opened, closed = self._simulate_position_update(
@@ -468,7 +598,12 @@ class OrderBook:
             # LEAN semantics: shorts consume buying power rather than crediting cash.
             shadow_cash -= abs(opened) * signal_price * multiplier
         shadow_cash -= estimate_commission(
-            broker.commission_model, order.asset, order.quantity, signal_price
+            broker.commission_model,
+            order.asset,
+            order.quantity,
+            signal_price,
+            order=order,
+            multiplier=broker.get_multiplier(order.asset),
         )
 
         if shadow_cash < 0.0:
@@ -504,7 +639,12 @@ class OrderBook:
         )
 
         commission = estimate_commission(
-            broker.commission_model, order.asset, order.quantity, signal_price
+            broker.commission_model,
+            order.asset,
+            order.quantity,
+            signal_price,
+            order=order,
+            multiplier=broker.get_multiplier(order.asset),
         )
         shadow_positions = self._build_shadow_policy_positions()
         available_cash = self._submission_shadow_cash
@@ -576,7 +716,27 @@ class OrderBook:
             return True
 
         multiplier = broker.get_multiplier(order.asset)
-        self._submission_shadow_cash += -size * signal_price * multiplier - commission
+        if self.account.futures_methods is not None and order.asset in self.account.futures_methods:
+            from .._variation import variation_fill
+
+            bases = self._submission_shadow_variation
+            assert bases is not None
+            payout, _quantity, basis = variation_fill(
+                old_qty,
+                bases.get(order.asset),
+                size,
+                new_qty,
+                signal_price,
+                multiplier,
+                self.account.futures_methods[order.asset],
+            )
+            self._submission_shadow_cash += payout - commission
+            if basis is None:
+                bases.pop(order.asset, None)
+            else:
+                bases[order.asset] = basis
+        else:
+            self._submission_shadow_cash += -size * signal_price * multiplier - commission
         if abs(new_qty) <= quantity_zero_tolerance(old_qty, size):
             self._submission_shadow_positions.pop(order.asset, None)
         else:

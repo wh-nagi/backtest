@@ -696,13 +696,21 @@ class TestEngine:
         assert results.metrics["max_open_positions"] == 1
 
         assert portfolio_state.columns == [
+            "observation_id",
             "timestamp",
             "equity",
             "cash",
             "gross_exposure",
             "net_exposure",
             "open_positions",
+            "observation_kind",
+            "holdings_complete",
+            "fill_sequence",
         ]
+        assert portfolio_state["observation_id"].to_list() == [0, 1, 2]
+        assert portfolio_state["observation_kind"].to_list() == ["bar"] * 3
+        assert portfolio_state["holdings_complete"].to_list() == [False] * 3
+        assert portfolio_state["fill_sequence"].null_count() == 3
         assert portfolio_state["open_positions"].to_list() == [1, 0, 0]
         assert portfolio_state["gross_exposure"].to_list() == [1000.0, 0.0, 0.0]
 
@@ -1089,11 +1097,11 @@ class TestRunBacktestWithConfig:
         )
 
         assert strategy.seen_config is not None
-        assert strategy.seen_config.calendar == "NYSE"
+        assert strategy.seen_config.resolved_calendar == "NYSE"
         assert strategy.seen_config.timezone == "America/New_York"
         assert strategy.seen_config.data_frequency == DataFrequency.MINUTE_1
         assert result.config is not None
-        assert result.config.calendar == "NYSE"
+        assert result.config.resolved_calendar == "NYSE"
 
     def test_run_backtest_preserves_explicit_runtime_config_over_feed_spec(self):
         """Explicit runtime config should not be overwritten by feed metadata."""
@@ -1140,7 +1148,7 @@ class TestRunBacktestWithConfig:
         )
 
         assert strategy.seen_config is not None
-        assert strategy.seen_config.calendar == "NYSE"
+        assert strategy.seen_config.resolved_calendar == "NYSE"
         assert strategy.seen_config.timezone == "UTC"
         assert strategy.seen_config.data_frequency == DataFrequency.DAILY
         assert result.config is not None

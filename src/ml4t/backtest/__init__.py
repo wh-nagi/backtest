@@ -15,6 +15,8 @@ try:
 except ImportError:
     __version__ = "0.0.0.dev0"
 
+from .auxiliary import AuxiliaryData
+from .benchmark import BenchmarkData
 from .broker import Broker
 from .config import BacktestConfig, CommissionType
 from .datafeed import DataFeed
@@ -28,6 +30,7 @@ from .execution.schedule import (
     is_rebalance_timestamp,
     resolve_rebalance_timestamps,
 )
+from .futures_lifecycle import FuturesLifecyclePolicy
 from .lifecycle import LifecycleDispatcher, LifecycleInvocation, callback_trace
 from .preopen import (
     AmbiguousBarPathError,
@@ -56,6 +59,7 @@ from .result import (
 from .risk.position.composite import RuleChain
 from .risk.position.dynamic import TrailingStop
 from .risk.position.static import StopLoss, TakeProfit
+from .runtime import RuntimeServices
 from .strategy import Strategy
 from .types import (
     AssetClass,
@@ -76,10 +80,14 @@ from .types import (
 del _compat
 
 __all__ = [
+    "BenchmarkData",
     # Core API
     "DataFeed",
     "Broker",
     "Strategy",
+    "RuntimeServices",
+    "FuturesLifecyclePolicy",
+    "AuxiliaryData",
     "Engine",
     "run_backtest",
     "BacktestConfig",

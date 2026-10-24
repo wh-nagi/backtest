@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
+from copy import deepcopy
 from datetime import date, datetime
 from math import ceil
 from typing import TYPE_CHECKING, Any
@@ -15,17 +16,24 @@ from ml4t.specs import (
     HistoricalStrategyCompatibilityError,
     LifecyclePhase,
     LifecycleVersion,
+    TimestampSemantics,
     negotiate_lifecycle_version,
 )
 
+from ._temporal import temporal_frame, timestamp_values
 from .analytics import EquityCurve, TradeAnalyzer
 from .analytics.metrics import calmar_ratio
+from .benchmark import BenchmarkData
 from .broker import Broker
+from .capital import CapitalChange, index_capital_events
 from .config import DataFrequency, ExecutionPrice
 from .datafeed import DataFeed
 from .funding import FundingPayment, index_funding_events
 from .lifecycle import LifecycleDispatcher
+from .models import CommissionModel, SlippageModel
 from .preopen import default_execution_policy
+from .runtime import RuntimeServices
+from .sessions import session_date_for_timestamp
 from .strategy import Strategy
 from .types import ExecutionMode, OrderSide, OrderType
 
@@ -89,22 +97,51 @@ class Engine:
         *,
         contract_specs: dict[str, Any] | None = None,
         market_impact_model: Any | None = None,
+        commission_model: CommissionModel | None = None,
+        slippage_model: SlippageModel | None = None,
         execution_limits: Any | None = None,
         funding_df: pl.DataFrame | None = None,
+        settlement_events: pl.DataFrame | None = None,
         lifecycle_version: LifecycleVersion | str = LifecycleVersion.V1,
         execution_policy: ExecutionPolicy | None = None,
         target_intent_state: dict[str, Any] | None = None,
+        holdings_sampling: str = "none",
+        runtime: RuntimeServices | None = None,
+        benchmark: BenchmarkData | None = None,
     ):
         from .config import BacktestConfig as ConfigCls
 
         negotiated_version = negotiate_lifecycle_version(lifecycle_version)
+        if holdings_sampling not in {"none", "bar", "session", "fill_and_session"}:
+            raise ValueError("holdings_sampling must be none, bar, session or fill_and_session")
+        self.runtime = (
+            runtime
+            if runtime is not None
+            else RuntimeServices()
+            if (
+                getattr(feed, "feature_metadata", None) is not None
+                or getattr(slippage_model, "requires_observed_ohlc", False)
+            )
+            else None
+        )
+        self.holdings_sampling = holdings_sampling
+        if benchmark is not None and not isinstance(benchmark, BenchmarkData):
+            raise TypeError("benchmark must be prepared BenchmarkData")
+        self._benchmark = benchmark
+        self.holdings: list[tuple[Any, ...]] | None = [] if holdings_sampling != "none" else None
         self._validate_strategy_lifecycle(strategy)
         if config is None:
             config = ConfigCls()
 
         self.feed = feed
         self.strategy = strategy
-        self.config = config.merge_feed_spec(getattr(feed, "feed_spec", None))
+        self.config = deepcopy(config).merge_feed_spec(getattr(feed, "feed_spec", None))
+        if (
+            holdings_sampling in {"session", "fill_and_session"}
+            and self.config.resolved_calendar is None
+        ):
+            raise ValueError("session holdings sampling requires a calendar")
+        self._session_holdings: dict[Any, tuple[int, list[tuple[Any, ...]]]] = {}
         self.execution_mode = self.config.execution_mode
         if (
             getattr(feed, "session_col", None) is not None
@@ -117,7 +154,23 @@ class Engine:
             self.config,
             contract_specs=contract_specs,
             market_impact_model=market_impact_model,
+            commission_model=commission_model,
+            slippage_model=slippage_model,
             execution_limits=execution_limits,
+        )
+        if self.config.cancel_policy.value == "session_end":
+            if self.config.resolved_calendar is None:
+                raise ValueError("session_end cancellation requires a declared calendar")
+            if self.config.resolved_timestamp_semantics not in {
+                TimestampSemantics.EVENT_TIME,
+                TimestampSemantics.BAR_CLOSE,
+            }:
+                raise ValueError(
+                    "session_end cancellation requires declared physical timestamp_semantics"
+                )
+        self.broker._configure_result_capture(
+            mark_times=holdings_sampling != "none",
+            after_fill=holdings_sampling == "fill_and_session",
         )
         if funding_df is None:
             self._funding_events = {}
@@ -130,6 +183,21 @@ class Engine:
                 set(prices_frame[feed._entity_col].unique().to_list()),
             )
         self.funding_payments: list[FundingPayment] = []
+        self._capital_events = index_capital_events(
+            getattr(feed, "capital_flows", None), list(feed.timestamps)
+        )
+        self.capital_changes: list[CapitalChange] = []
+        actions = getattr(feed, "corporate_actions", None)
+        self._corporate_actions = (
+            self.broker._create_corporate_action_ledger(
+                actions, feed.input_manifest, self.config, list(feed.timestamps)
+            )
+            if actions is not None
+            else None
+        )
+        self._futures_ledger = self.broker._create_futures_ledger(
+            settlement_events, list(feed.timestamps)
+        )
         if self.broker.execution_price is ExecutionPrice.VWAP and not getattr(
             self.feed.feed_spec, "vwap_col", None
         ):
@@ -178,9 +246,25 @@ class Engine:
         """
         if self._has_run:
             raise RuntimeError("Engine.run() was already started; create a new Engine for each run")
+        verify_inputs = getattr(self.feed, "verify_input_integrity", None)
+        if verify_inputs is not None:
+            verify_inputs()
         self._has_run = True
+        if self._benchmark is not None:
+            self._validate_benchmark_coverage()
+        if self.runtime is not None:
+            self.runtime._bind(self)
         try:
-            return self._run_once()
+            result = self._run_once()
+            if verify_inputs is not None:
+                verify_inputs()
+            if self._benchmark is not None:
+                result.benchmark = self._benchmark.select(
+                    [time for time, _ in result.equity_curve],
+                    timezone=self.config.resolved_timezone,
+                )
+                result.benchmark_metadata = self._benchmark.metadata
+            return result
         except BaseException as failure:
             try:
                 self._finalize_strategy()
@@ -190,6 +274,39 @@ class Engine:
                     f"{type(finalization_failure).__name__}: {finalization_failure}"
                 )
             raise
+        finally:
+            if self.runtime is not None:
+                self.runtime._unbind()
+
+    def _validate_benchmark_coverage(self) -> None:
+        from .calendar import filter_to_trading_sessions
+
+        if self.config.resolved_timestamp_semantics not in {
+            TimestampSemantics.EVENT_TIME,
+            TimestampSemantics.BAR_CLOSE,
+        }:
+            raise ValueError(
+                "Benchmark alignment requires physical event_time/bar_close feed instants"
+            )
+
+        points = [
+            point
+            for point in self.feed.timestamps
+            if self.runtime is None or self.runtime._accepts(point)
+        ]
+        frame = temporal_frame({"timestamp": points})
+        if self.config.resolved_calendar is not None and self.config.enforce_sessions:
+            frame = filter_to_trading_sessions(
+                frame,
+                self.config.resolved_calendar,
+                naive_tz=self.config.resolved_timezone,
+                timestamp_semantics=self.config.resolved_timestamp_semantics,
+                bar_label=self.config.resolved_feed_spec.bar_label,
+            )
+        assert self._benchmark is not None
+        self._benchmark.select(
+            timestamp_values(frame["timestamp"]), timezone=self.config.resolved_timezone
+        )
 
     def _run_once(self) -> BacktestResult:
         """Execute one guarded engine run."""
@@ -197,17 +314,19 @@ class Engine:
         # Lazy calendar initialization (zero cost if unused)
         is_trading_day_fn = None
         valid_intraday_bar_mask: bytearray | None = None
+        use_session_labels = False
         timestamps = self.feed.timestamps
         if self.config and self.config.resolved_calendar:
             from .calendar import filter_to_trading_sessions, get_calendar, is_trading_day
 
             self._calendar = get_calendar(self.config.resolved_calendar)
             is_trading_day_fn = is_trading_day
+            semantics = self.config.resolved_timestamp_semantics
+            use_session_labels = semantics == TimestampSemantics.SESSION_LABEL or (
+                semantics is None and self.config.resolved_data_frequency == DataFrequency.DAILY
+            )
 
-            if (
-                self.config.enforce_sessions
-                and self.config.resolved_data_frequency != DataFrequency.DAILY
-            ):
+            if self.config.enforce_sessions and not use_session_labels:
                 prices_frame = self.feed.prices
                 timestamp_dtype = (
                     prices_frame.schema[self.feed.feed_spec.timestamp_col]
@@ -217,7 +336,7 @@ class Engine:
                 naive_timestamps = (
                     isinstance(timestamp_dtype, pl.Datetime) and timestamp_dtype.time_zone is None
                 )
-                timestamp_frame = pl.DataFrame(
+                timestamp_frame = temporal_frame(
                     {
                         "timestamp": timestamps,
                         "__feed_bar_index": range(len(timestamps)),
@@ -227,6 +346,8 @@ class Engine:
                     timestamp_frame,
                     self.config.resolved_calendar,
                     naive_tz=self.config.resolved_timezone,
+                    timestamp_semantics=self.config.resolved_timestamp_semantics,
+                    bar_label=self.config.resolved_feed_spec.bar_label,
                 )
                 retained_bars = len(filtered)
                 total_bars = len(timestamp_frame)
@@ -260,6 +381,8 @@ class Engine:
                                 diagnostic_frame,
                                 calendar_id,
                                 naive_tz=self.config.resolved_timezone,
+                                timestamp_semantics=self.config.resolved_timestamp_semantics,
+                                bar_label=self.config.resolved_feed_spec.bar_label,
                             )
                         )
                     alternative_sample_retained = len(
@@ -267,6 +390,8 @@ class Engine:
                             diagnostic_frame,
                             calendar_id,
                             naive_tz=calendar_timezone,
+                            timestamp_semantics=self.config.resolved_timestamp_semantics,
+                            bar_label=self.config.resolved_feed_spec.bar_label,
                         )
                     )
                 if configured_sample_retained:
@@ -323,7 +448,7 @@ class Engine:
                     valid_intraday_bar_mask[index] = 1
 
         if self._funding_events and self.config.enforce_sessions and self._calendar:
-            if self.config.resolved_data_frequency == DataFrequency.DAILY:
+            if use_session_labels:
                 assert is_trading_day_fn is not None
                 calendar_id = self.config.resolved_calendar
                 assert calendar_id is not None
@@ -356,9 +481,19 @@ class Engine:
             self.config,
         )
 
+        if self.runtime is not None:
+            self.runtime.scheduler._prepare()
+
         session_mode = getattr(self.feed, "session_col", None) is not None
         session_assets: dict[str, dict[str, Any]] = {}
         session_context: dict[str, Any] = {}
+        expire_orders = (
+            self.broker._expire_session_orders
+            if self.config.cancel_policy.value == "session_end"
+            else None
+        )
+        corporate_actions = self._corporate_actions
+        futures_ledger = self._futures_ledger
         for feed_bar_index, (timestamp, assets_data, context) in enumerate(self.feed):
             # Calendar session enforcement
             calendar_id = self.config.resolved_calendar if self.config else None
@@ -369,12 +504,19 @@ class Engine:
                 and self.config.enforce_sessions
                 and is_trading_day_fn
             ):
-                # Daily bars use valid dates. Intraday bars use precomputed session intervals.
-                if self.config.resolved_data_frequency == DataFrequency.DAILY:
+                # Session labels use dates; instants use precomputed session intervals.
+                if use_session_labels:
                     session_date = (
                         self.feed._session_by_timestamp[timestamp]
                         if session_mode
-                        else timestamp.date()
+                        else session_date_for_timestamp(
+                            timestamp,
+                            calendar=calendar_id,
+                            timezone=self.config.resolved_timezone,
+                            session_start_time=self.config.resolved_session_start_time,
+                            data_frequency=self.config.resolved_data_frequency,
+                            timestamp_semantics=self.config.resolved_timestamp_semantics,
+                        )
                     )
                     if not is_trading_day_fn(calendar_id, session_date):
                         self._skipped_bars += 1
@@ -382,6 +524,25 @@ class Engine:
                 elif valid_intraday_bar_mask is None or not valid_intraday_bar_mask[feed_bar_index]:
                     self._skipped_bars += 1
                     continue
+
+            if self.runtime is not None:
+                if not self.runtime._accepts(timestamp):
+                    continue
+                self.runtime.scheduler._before_event(timestamp, has_price_event=bool(assets_data))
+                if corporate_actions is not None:
+                    corporate_actions.advance(timestamp)
+                if futures_ledger is not None:
+                    futures_ledger.advance(timestamp)
+                assets_data = self.runtime._advance(timestamp, assets_data)
+                context = self.runtime._mask_context(timestamp, context)
+
+            if expire_orders is not None:
+                expire_orders(timestamp, after_event=False)
+
+            if corporate_actions is not None and self.runtime is None:
+                corporate_actions.advance(timestamp)
+            if futures_ledger is not None and self.runtime is None:
+                futures_ledger.advance(timestamp)
 
             prices = getattr(assets_data, "_prices", None)
             opens = getattr(assets_data, "_opens", None)
@@ -468,9 +629,14 @@ class Engine:
                 ask_sizes,
                 signals,
             )
+            if corporate_actions is not None:
+                corporate_actions.refresh()
             if session_mode:
                 session_assets.update(assets_data)
                 session_context.update(context)
+            capital_events = self._capital_events.get(timestamp)
+            if capital_events:
+                self.capital_changes.extend(self.broker._apply_capital_events(capital_events))
             funding_events = self._funding_events.get(timestamp)
             if funding_events:
                 self.funding_payments.extend(self.broker._apply_funding(funding_events))
@@ -492,6 +658,10 @@ class Engine:
             if self.execution_mode == ExecutionMode.NEXT_BAR:
                 # Process same-cycle risk exits before ordinary strategy decisions.
                 self.broker._process_orders(use_open=True)
+                if futures_ledger is not None:
+                    futures_ledger.on_mark(timestamp, "before_callbacks")
+                if self.runtime is not None:
+                    self.runtime.scheduler._on_event(timestamp, assets_data, context, opening=True)
                 # Strategy generates new orders
                 if not session_mode or timestamp in self.feed._session_decision_timestamps:
                     self._dispatch_market_event(
@@ -501,8 +671,12 @@ class Engine:
                     )
                     session_assets = {}
                     session_context = {}
+                if self.runtime is not None:
+                    self.runtime.scheduler._on_event(timestamp, assets_data, context, opening=False)
+                if self.broker._has_account_controls():
+                    self.broker.validate_account_controls(boundary="after_callbacks")
                 # MOC orders are the one next-bar exception: they execute on the
-                # current session close after strategy logic runs.
+                # current bar close after strategy logic runs.
                 self.broker._process_orders(
                     order_types={OrderType.MOC},
                     include_orders_this_bar=not session_mode,
@@ -510,17 +684,34 @@ class Engine:
             else:
                 # Same-bar mode: process before and after strategy
                 self.broker._process_orders()
+                if futures_ledger is not None:
+                    futures_ledger.on_mark(timestamp, "before_callbacks")
+                if self.runtime is not None:
+                    self.runtime.scheduler._on_event(timestamp, assets_data, context, opening=True)
                 self._dispatch_market_event(timestamp, assets_data, context)
+                if self.runtime is not None:
+                    self.runtime.scheduler._on_event(timestamp, assets_data, context, opening=False)
+                if self.broker._has_account_controls():
+                    self.broker.validate_account_controls(boundary="after_callbacks")
                 self.broker._process_orders()
 
             self.preopen_target_manager.reconcile(timestamp)
+            if expire_orders is not None:
+                expire_orders(timestamp, after_event=True)
+            if self.broker._has_account_controls():
+                self.broker.validate_account_controls(boundary="after_fills")
+                self.broker._validate_session_end_account_controls(timestamp)
 
             # Update water marks at END of bar, AFTER all orders processed
             # This ensures new positions get their HWM updated from entry bar's high
             # VBT Pro behavior: HWM updated at bar end, used in NEXT bar's trail evaluation
+            if futures_ledger is not None:
+                futures_ledger.on_mark(timestamp, "after_fills")
             self.broker._update_water_marks()
 
             self._record_portfolio_state(timestamp)
+            if self.runtime is not None:
+                self.runtime.scheduler._after_event(timestamp)
 
         self._finalize_strategy()
         self.strategy._validate_completed_run()
@@ -595,25 +786,63 @@ class Engine:
         """
         return self.run().to_dict()
 
+    def _advance_account_events(self, timestamp: datetime) -> None:
+        if self._corporate_actions is not None:
+            self._corporate_actions.advance(timestamp)
+        if self._futures_ledger is not None:
+            self._futures_ledger.advance(timestamp)
+
     def _record_portfolio_state(self, timestamp: datetime) -> None:
-        """Capture per-bar portfolio state for reporting."""
-        cash = self.broker.cash
-        gross_exposure = 0.0
-        net_exposure = 0.0
-
-        for asset, pos in self.broker.positions.items():
-            price = self.broker.get_mark_price(asset, quantity=pos.quantity)
-            if price is None:
-                price = self.broker.get_last_price(asset) or pos.current_price or pos.entry_price
-            position_value = pos.quantity * price * pos.multiplier
-            gross_exposure += abs(position_value)
-            net_exposure += position_value
-
-        equity = cash + net_exposure
-        self.equity_curve.append((timestamp, equity))
-        self.portfolio_state.append(
-            (timestamp, equity, cash, gross_exposure, net_exposure, len(self.broker.positions))
+        """Capture per-bar NAV and explicitly sampled observed positions."""
+        observation = len(self.portfolio_state)
+        state, holdings = self.broker._observe_portfolio(
+            timestamp, observation, include_holdings=self.holdings is not None
         )
+        self.equity_curve.append((timestamp, state[0]))
+        self.portfolio_state.append((timestamp, state[0], state[1], state[2], state[3], state[4]))
+        if holdings is not None:
+            if self.holdings_sampling == "bar":
+                assert self.holdings is not None
+                self.holdings.extend((timestamp, observation, *row) for row in holdings)
+            else:
+                session = session_date_for_timestamp(
+                    timestamp,
+                    calendar=self.config.resolved_calendar,
+                    timezone=self.config.resolved_timezone,
+                    session_start_time=self.config.resolved_session_start_time,
+                    data_frequency=self.config.resolved_data_frequency,
+                    timestamp_semantics=self.config.resolved_timestamp_semantics,
+                    bar_label=self.config.resolved_feed_spec.bar_label,
+                )
+                self._session_holdings[session] = (observation, holdings)
+
+    def _result_observations(self):
+        if self.holdings_sampling in {"none", "bar"}:
+            metadata = (
+                []
+                if self.holdings_sampling == "none"
+                else [("bar", True, None)] * len(self.portfolio_state)
+            )
+            return list(self.portfolio_state), self.holdings, metadata
+        selected = dict(self._session_holdings.values())
+        events = []
+        for index, row in enumerate(self.portfolio_state):
+            holdings = selected.get(index)
+            kind = "session_last_observed" if holdings is not None else "bar"
+            events.append((row[0], len(self.broker.fills), row, holdings, kind, None))
+        for sequence, timestamp, state, holdings in self.broker._observed_fill_accounts():
+            events.append(
+                (timestamp, sequence, (timestamp, *state), holdings, "after_fill", sequence)
+            )
+        events.sort(key=lambda event: (event[0], event[1]))
+        account, captured, metadata = [], [], []
+        for timestamp, _, state, holdings, kind, sequence in events:
+            observation = len(account)
+            account.append(state)
+            metadata.append((kind, holdings is not None, sequence))
+            if holdings is not None:
+                captured.extend((timestamp, observation, *row) for row in holdings)
+        return account, captured, metadata
 
     def _build_activity_metrics(self) -> dict[str, int | float]:
         """Compute fill and portfolio activity metrics."""
@@ -731,6 +960,54 @@ class Engine:
                 for invocation in self.lifecycle_dispatcher.invocations
             ]
 
+        if len(self.capital_changes) != sum(map(len, self._capital_events.values())):
+            raise ValueError("capital flow occurs outside accepted calendar observations")
+
+        observed_account, observed_holdings, observation_metadata = self._result_observations()
+
+        action_records = (
+            None if self._corporate_actions is None else deepcopy(self._corporate_actions.records)
+        )
+        action_entitlements = (
+            None
+            if self._corporate_actions is None
+            else deepcopy(
+                sorted(
+                    [
+                        *self._corporate_actions.completed,
+                        *self._corporate_actions.entitlements.values(),
+                    ],
+                    key=lambda entry: (entry["entitlement_at"], entry["source"], entry["event_id"]),
+                )
+            )
+        )
+        action_receivables = self.broker._corporate_receivable_observations(
+            observed_account, observation_metadata
+        )
+        accounting_observations = self.broker._accounting_observations(
+            observed_account, observation_metadata
+        )
+        instrument_accounting = (
+            {
+                asset: {
+                    "accounting_method": "futures_variation",
+                    "settlement_policy": mode,
+                    "currency": self.broker._get_contract_currency(asset),
+                    "multiplier": self.broker.get_multiplier(asset),
+                }
+                for asset, mode in self.broker.account.futures_methods.items()
+            }
+            if self.broker.account.futures_methods is not None
+            else None
+        )
+        futures_settlements = (
+            deepcopy(self._futures_ledger.records) if self._futures_ledger is not None else None
+        )
+        futures_rolls = self.broker._observed_rolls()
+        account_method = (
+            "per_instrument" if instrument_accounting is not None else "signed_notional"
+        )
+
         if not self.equity_curve:
             # Return empty result for no-data case
             return BacktestResult(
@@ -749,11 +1026,28 @@ class Engine:
                     "num_funding_events": 0,
                     **contract_evidence,
                 },
-                config=self.config,
+                config=deepcopy(self.config),
+                initial_capital=self.config.initial_cash,
+                returns_include_commissions=True,
+                account_method=account_method,
+                instrument_accounting=instrument_accounting,
+                accounting_observations=accounting_observations,
+                futures_settlements=futures_settlements,
+                futures_rolls=futures_rolls,
+                input_provenance=getattr(self.feed, "input_provenance", None),
+                holdings=observed_holdings,
+                observation_metadata=observation_metadata,
+                recorded_variables=self.broker._recorded_variables(),
+                holdings_sampling=self.holdings_sampling,
+                capital_changes=list(self.capital_changes),
+                corporate_actions=action_records,
+                corporate_entitlements=action_entitlements,
+                corporate_receivables=action_receivables,
             )
 
         # Build EquityCurve from raw data
         equity = EquityCurve.from_config(self.config)
+        equity.capital_changes = list(self.capital_changes)
         for ts, value in self.equity_curve:
             equity.append(ts, value)
 
@@ -765,9 +1059,7 @@ class Engine:
             last_timestamp = self.equity_curve[-1][0]
             for asset, pos in self.broker.positions.items():
                 # Get last known price for this asset
-                last_price = (
-                    self.broker.get_mark_price(asset, quantity=pos.quantity) or pos.entry_price
-                )
+                last_price, _, _ = self.broker._position_mark(asset, pos)
                 entry_quote = pos.context.get("entry_quote_context", {})
                 exit_quote = self.broker.get_quote_context(
                     asset,
@@ -837,6 +1129,8 @@ class Engine:
             "total_commission": sum(f.commission for f in self.broker.fills),
             "total_slippage": sum(t.total_slippage_cost for t in all_trades),
             "total_funding": sum(payment.cash_delta for payment in self.funding_payments),
+            "total_external_flow": sum(change.cash_delta for change in self.capital_changes),
+            "num_capital_changes": len(self.capital_changes),
             "num_funding_events": len(self.funding_payments),
             # Additional metrics
             "sharpe": equity.sharpe,
@@ -867,14 +1161,30 @@ class Engine:
 
         return BacktestResult(
             trades=all_trades,  # Includes both closed and open trades
+            corporate_actions=action_records,
+            corporate_entitlements=action_entitlements,
+            corporate_receivables=action_receivables,
             equity_curve=list(self.equity_curve),
             fills=list(self.broker.fills),
             rejected_orders=self.broker.get_rejected_orders(),
             funding_payments=list(self.funding_payments),
             predictions=self.feed.signals,
-            portfolio_state=list(self.portfolio_state),
+            portfolio_state=observed_account,
             metrics=metrics,
-            config=self.config,
+            config=deepcopy(self.config),
+            initial_capital=self.config.initial_cash,
+            returns_include_commissions=True,
+            account_method=account_method,
+            instrument_accounting=instrument_accounting,
+            accounting_observations=accounting_observations,
+            futures_settlements=futures_settlements,
+            futures_rolls=futures_rolls,
+            input_provenance=getattr(self.feed, "input_provenance", None),
+            holdings=observed_holdings,
+            observation_metadata=observation_metadata,
+            recorded_variables=self.broker._recorded_variables(),
+            holdings_sampling=self.holdings_sampling,
+            capital_changes=list(self.capital_changes),
             equity=equity,
             trade_analyzer=trade_analyzer,
         )
@@ -888,11 +1198,17 @@ class Engine:
         *,
         contract_specs: dict[str, Any] | None = None,
         market_impact_model: Any | None = None,
+        commission_model: CommissionModel | None = None,
+        slippage_model: SlippageModel | None = None,
         execution_limits: Any | None = None,
         funding_df: pl.DataFrame | None = None,
+        settlement_events: pl.DataFrame | None = None,
         lifecycle_version: LifecycleVersion | str = LifecycleVersion.V1,
         execution_policy: ExecutionPolicy | None = None,
         target_intent_state: dict[str, Any] | None = None,
+        holdings_sampling: str = "none",
+        runtime: RuntimeServices | None = None,
+        benchmark: BenchmarkData | None = None,
     ) -> Engine:
         """Create an Engine instance from a BacktestConfig.
 
@@ -905,8 +1221,11 @@ class Engine:
             config: BacktestConfig with all behavioral settings
             contract_specs: Per-asset contract specifications (futures multipliers, etc.)
             market_impact_model: Market impact model for fill simulation
+            commission_model: Explicit native fee model overriding configured fee rates
+            slippage_model: Explicit native slippage model overriding configured rates
             execution_limits: Execution limits (max order size, etc.)
             funding_df: Timestamped funding rates or amounts for named assets
+            runtime: Optional causal market/history and callback services for this run
 
         Returns:
             Configured Engine instance
@@ -917,11 +1236,17 @@ class Engine:
             config,
             contract_specs=contract_specs,
             market_impact_model=market_impact_model,
+            commission_model=commission_model,
+            slippage_model=slippage_model,
             execution_limits=execution_limits,
             funding_df=funding_df,
+            settlement_events=settlement_events,
             lifecycle_version=lifecycle_version,
             execution_policy=execution_policy,
             target_intent_state=target_intent_state,
+            holdings_sampling=holdings_sampling,
+            runtime=runtime,
+            benchmark=benchmark,
         )
 
 
@@ -939,11 +1264,20 @@ def run_backtest(
     contract: Any | None = None,
     contract_specs: dict[str, Any] | None = None,
     market_impact_model: Any | None = None,
+    commission_model: CommissionModel | None = None,
+    slippage_model: SlippageModel | None = None,
     execution_limits: Any | None = None,
     funding_df: pl.DataFrame | None = None,
+    settlement_events: pl.DataFrame | None = None,
+    capital_flows: pl.DataFrame | None = None,
+    corporate_actions: pl.DataFrame | None = None,
+    input_manifest: dict[str, Any] | None = None,
     lifecycle_version: LifecycleVersion | str = LifecycleVersion.V1,
     execution_policy: ExecutionPolicy | None = None,
     target_intent_state: dict[str, Any] | None = None,
+    holdings_sampling: str = "none",
+    runtime: RuntimeServices | None = None,
+    benchmark: BenchmarkData | None = None,
 ) -> BacktestResult:
     """Run a backtest with minimal setup.
 
@@ -957,8 +1291,11 @@ def run_backtest(
         contract: Alias for feed_spec
         contract_specs: Per-asset contract specifications (futures multipliers, etc.)
         market_impact_model: Market impact model for fill simulation
+        commission_model: Explicit native fee model overriding configured fee rates
+        slippage_model: Explicit native slippage model overriding configured rates
         execution_limits: Execution limits (max order size, etc.)
         funding_df: Timestamped funding rates or amounts for named assets
+        runtime: Optional causal market/history and callback services for this run
 
     Returns:
         BacktestResult with metrics, trades, equity curve, and export methods.
@@ -987,6 +1324,9 @@ def run_backtest(
         context_df=context if isinstance(context, pl.DataFrame) else None,
         feed_spec=feed_spec,
         contract=contract,
+        capital_flows=capital_flows,
+        corporate_actions=corporate_actions,
+        input_manifest=input_manifest,
     )
 
     if isinstance(config, str):
@@ -1000,9 +1340,15 @@ def run_backtest(
         config,
         contract_specs=contract_specs,
         market_impact_model=market_impact_model,
+        commission_model=commission_model,
+        slippage_model=slippage_model,
         execution_limits=execution_limits,
         funding_df=funding_df,
+        settlement_events=settlement_events,
         lifecycle_version=lifecycle_version,
         execution_policy=execution_policy,
         target_intent_state=target_intent_state,
+        holdings_sampling=holdings_sampling,
+        runtime=runtime,
+        benchmark=benchmark,
     ).run()

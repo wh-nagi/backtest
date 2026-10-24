@@ -12,6 +12,7 @@ from typing import Any
 from common.correctness_evidence import correctness_report_failures
 from common.framework_registry import load_framework_manifest
 from large_scale_evidence import report_failures as large_scale_report_failures
+from real_strategy_benchmark import applicable_review
 from real_strategy_benchmark import report_failures as real_strategy_performance_failures
 from real_strategy_evidence import report_failures as real_strategy_report_failures
 from scenarios.definitions import SCENARIOS
@@ -94,6 +95,20 @@ def _comparison_checks(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for check in comparison["checks"]
         if isinstance(check, dict) and "name" in check
     }
+
+
+def measurement_caption(performance: dict[str, Any]) -> str:
+    """Keep the measurement dates independent of later report generation."""
+    cohorts = performance["provenance"].get("measurement_cohorts")
+    if cohorts is None:
+        return f"Measured {performance['generated_at'][:10]}"
+    start = cohorts["backtest"]["started_at"][:10]
+    end = cohorts["backtest"]["completed_at"][:10]
+    backtest_date = start if start == end else f"{start} to {end}"
+    return (
+        f"Backtest measured {backtest_date}; reference measurements dated "
+        f"{cohorts['framework']['generated_at'][:10]} were retained unchanged"
+    )
 
 
 def render_claims(
@@ -227,6 +242,21 @@ def render_claims(
     timing_policy = real_performance["timing_policy"]
     environment = real_performance["environment"]
     excluded = ", ".join(timing_policy["excluded"])
+    review = applicable_review(real_performance, real_strategy)
+    review_lines = (
+        [
+            "",
+            "A performance-impact review retains these measurements for engine source "
+            f"`{review['engine_source_sha256'][:12]}`. The measured source, locked dependencies, "
+            "review rationale and current correctness evidence are recorded with the raw samples. "
+            "Measurements are repeated when changes materially affect timed execution; "
+            "a new source revision alone does not require a benchmark rerun. "
+            "Dependency validation checks selected packages and artifacts; allowing prereleases "
+            "without changing those selections does not invalidate the measurements.",
+        ]
+        if review is not None
+        else []
+    )
 
     return "\n".join(
         [
@@ -264,13 +294,14 @@ def render_claims(
             "|---|---|---:|---:|---:|",
             *performance_rows,
             "",
-            f"Measured {real_performance['generated_at'][:10]} on "
+            f"{measurement_caption(real_performance)}. Host: "
             f"`{environment['platform']}` with {environment['cpu_count']} logical CPUs. Each "
             "side used one isolated warm-up process and ten isolated measured processes. The "
             f"timer includes only the engine call; it excludes {excluded}. These measurements "
             "apply only to the named strategy, framework version, frozen input bundle, and "
             f"machine. Raw samples and bootstrap intervals are retained in "
             f"[real-strategy performance evidence]({real_performance_url}).",
+            *review_lines,
             "",
             "### Synthetic diagnostic scenarios",
             "",

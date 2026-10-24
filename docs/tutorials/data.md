@@ -131,7 +131,9 @@ final equity: $100050.00
 
 ## Crypto perpetuals
 
-The contract uses the futures accounting convention; a later tutorial adds funding payments.
+The contract uses Backtest's notional-value cash ledger with per-contract margin
+requirements. It does not post daily variation cash. A later tutorial adds funding
+payments; see [account policies](../user-guide/accounts.md) for the ledger boundary.
 
 <!-- ml4t-doc-test: smoke-crypto-perp -->
 ```python
@@ -142,12 +144,14 @@ from ml4t.backtest import AssetClass, ContractSpec
 
 prices = load_example_prices("crypto_perp")
 feed = DataFeed(prices_df=prices)
-config = BacktestConfig(initial_cash=100000, allow_leverage=True)
+config = BacktestConfig(initial_cash=100000, allow_leverage=True, calendar="crypto")
 spec = ContractSpec(symbol="BTC-PERP", asset_class=AssetClass.FUTURE, margin=4000)
 engine = Engine(feed, ExampleRoundTrip("BTC-PERP", 1), config, contract_specs={"BTC-PERP": spec})
 result = engine.run()
 assert len(result.fills) == 2 and len(result.trades) == 1
 print("ml4t-backtest " + version("ml4t-backtest"))
+assert result.config.resolved_calendar == "crypto"
+assert result.equity.periods_per_year == 365.0
 print(f"crypto_perp: fills={len(result.fills)}, trades={len(result.trades)}")
 print(f"final equity: ${result.metrics['final_value']:.2f}")
 ```

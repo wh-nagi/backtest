@@ -97,11 +97,39 @@ def _check_equity_terminal(
     if "num_funding_events" in result.metrics:
         assert result.metrics["num_funding_events"] == len(result.funding_payments)
 
-    expected = initial_cash + realized_pnl + open_pnl + funding
+    external = sum(change.cash_delta for change in result.capital_changes)
+    if "total_external_flow" in result.metrics:
+        assert result.metrics["total_external_flow"] == external, (
+            "external capital does not reconcile"
+        )
+    distributions = sum(
+        row["cash_delta"]
+        for row in result.corporate_actions or ()
+        if row["operation"] == "payment"
+        and row["action_kind"] in {"cash_dividend", "cash_distribution"}
+    )
+    if result.config is not None and result.config.corporate_action_policy == "declared_terms":
+        distributions += sum(
+            row["cash_amount"]
+            for row in result.corporate_entitlements or ()
+            if not row["paid"] and row["action_kind"] in {"cash_dividend", "cash_distribution"}
+        )
+        distributions += sum(
+            row["receivable_value"]
+            - row["cash_amount"]
+            - row["security_quantity"] * (row.get("destination_basis") or 0.0)
+            - (row.get("destination_commission") or 0.0)
+            for row in result.corporate_entitlements or ()
+            if not row["paid"] and row["security_quantity"]
+        )
+    corporate_pnl = sum((row.get("realized_pnl") or 0.0) for row in result.corporate_actions or ())
+    expected = (
+        initial_cash + realized_pnl + open_pnl + funding + external + distributions + corporate_pnl
+    )
     diff = abs(expected - final_value)
 
     reported_trades = [*realized_trades, *open_trades]
-    terms = [initial_cash, *(t.pnl for t in reported_trades), funding]
+    terms = [initial_cash, *(t.pnl for t in reported_trades), funding, external]
     notionals = [abs(t.quantity) * t.exit_price * t.multiplier for t in reported_trades]
     tol = _accounting_tolerance(
         expected,
@@ -114,7 +142,7 @@ def _check_equity_terminal(
     assert diff <= tol, (
         f"Equity terminal invariant violated: "
         f"initial_cash({initial_cash}) + realized_pnl({realized_pnl:.6f}) + "
-        f"open_pnl({open_pnl:.6f}) + funding({funding:.6f}) = {expected:.6f} "
+        f"open_pnl({open_pnl:.6f}) + funding({funding:.6f}) + external({external:.6f}) = {expected:.6f} "
         f"!= final_value({final_value:.6f}), "
         f"diff={diff:.10f}, tol={tol:.6f}"
     )
@@ -282,7 +310,7 @@ def _check_fill_order_type_bounds(result: BacktestResult) -> None:
         limit_price = getattr(f, "limit_price", None)
         stop_price = getattr(f, "stop_price", None)
 
-        if order_type == "limit" and limit_price is not None:
+        if order_type in {"limit", "stop_limit"} and limit_price is not None:
             if f.side == OrderSide.BUY:
                 assert f.price <= limit_price + tol, (
                     f"Fill order-type bound violated for fill {i} ({f.asset}): "
@@ -294,6 +322,11 @@ def _check_fill_order_type_bounds(result: BacktestResult) -> None:
                     f"limit SELL filled at {f.price:.6f} < limit_price {limit_price:.6f}"
                 )
         elif order_type == "stop" and stop_price is not None:
+            triggered_at = getattr(f, "stop_triggered_at", None)
+            if triggered_at is not None:
+                assert triggered_at <= f.timestamp, "Stop trigger cannot occur after execution"
+                if triggered_at < f.timestamp:
+                    continue  # A previously triggered stop's remainder is a market order.
             if f.side == OrderSide.BUY:
                 assert f.price >= stop_price - tol, (
                     f"Fill order-type bound violated for fill {i} ({f.asset}): "
@@ -310,6 +343,14 @@ def _check_commission_allocation(result: BacktestResult) -> None:
     """Verify every charged fill commission is allocated to a realized or open trade."""
     fill_commission = sum(fill.commission for fill in result.fills)
     trade_commission = sum(trade.fees for trade in result.trades)
+    trade_commission += sum(
+        (row.get("allocated_commission") or 0.0) for row in result.corporate_actions or ()
+    )
+    trade_commission += sum(
+        (row.get("destination_commission") or 0.0)
+        for row in result.corporate_entitlements or ()
+        if not row["paid"]
+    )
     tol = _accounting_tolerance(
         fill_commission,
         trade_commission,

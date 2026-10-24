@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..capital import CapitalChange, flow_adjusted_returns
 from .annualization import resolve_periods_per_year
 from .metrics import (
     TRADING_DAYS_PER_YEAR,
@@ -36,6 +37,9 @@ class EquityCurve:
     timestamps: list[datetime] = field(default_factory=list)
     values: list[float] = field(default_factory=list)
     periods_per_year_override: float | None = None
+    observation_based: bool = False
+    initial_capital: float | None = None
+    capital_changes: list[CapitalChange] = field(default_factory=list)
 
     def append(self, timestamp: datetime, value: float) -> None:
         """Add a data point."""
@@ -48,6 +52,16 @@ class EquityCurve:
     @property
     def returns(self) -> np.ndarray:
         """Daily returns."""
+        if self.capital_changes:
+            return np.array(
+                flow_adjusted_returns(
+                    list(zip(self.timestamps, self.values)),
+                    self.initial_value,
+                    self.capital_changes,
+                )
+            )
+        if self.initial_capital is not None and self.values:
+            return returns_from_values([self.initial_capital, *self.values])
         if len(self.values) < 2:
             return np.array([])
         return returns_from_values(self.values)
@@ -57,12 +71,23 @@ class EquityCurve:
         """Cumulative returns from start."""
         if len(self.values) < 1:
             return np.array([])
-        initial = self.values[0]
+        initial = self.initial_value
+        if self.capital_changes:
+            return np.cumprod(1 + self.returns) - 1
         return np.array(self.values) / initial - 1
+
+    @property
+    def performance_values(self) -> np.ndarray:
+        """Investment wealth at the initial capital scale, excluding external cash."""
+        if self.capital_changes:
+            return self.initial_value * np.cumprod(1 + self.returns)
+        return np.array(self.values)
 
     @property
     def initial_value(self) -> float:
         """Starting portfolio value."""
+        if self.initial_capital is not None:
+            return self.initial_capital
         return self.values[0] if self.values else 0.0
 
     @property
@@ -73,13 +98,17 @@ class EquityCurve:
     @property
     def total_return(self) -> float:
         """Total return as decimal."""
-        if not self.values or self.values[0] == 0:
+        if not self.values or self.initial_value == 0:
             return 0.0
-        return self.values[-1] / self.values[0] - 1
+        if self.capital_changes:
+            return float(self.cumulative_returns[-1])
+        return self.values[-1] / self.initial_value - 1
 
     @property
     def years(self) -> float:
-        """Duration in years based on elapsed wall-clock time."""
+        """Duration in observation periods or elapsed wall-clock years."""
+        if self.observation_based:
+            return max(len(self.values) - 1, 0) / self.periods_per_year
         if len(self.timestamps) >= 2:
             elapsed_seconds = (self.timestamps[-1] - self.timestamps[0]).total_seconds()
             if elapsed_seconds > 0:
@@ -91,6 +120,8 @@ class EquityCurve:
         """Annualization factor, preferring configured cadence over elapsed-time inference."""
         if self.periods_per_year_override is not None:
             return float(self.periods_per_year_override)
+        if self.observation_based:
+            return float(TRADING_DAYS_PER_YEAR)
         if len(self.values) < 2 or len(self.timestamps) < 2:
             return float(TRADING_DAYS_PER_YEAR)
         elapsed_seconds = (self.timestamps[-1] - self.timestamps[0]).total_seconds()
@@ -106,14 +137,26 @@ class EquityCurve:
     def from_config(cls, config: BacktestConfig) -> EquityCurve:
         """Create an equity curve with annualization metadata derived from config."""
         feed_spec = config.resolved_feed_spec
-        periods_per_year = resolve_periods_per_year(
-            feed_spec.data_frequency,
-            calendar=feed_spec.calendar,
+        observation_based = config.time_contract_version == 2 and config.resolved_calendar is None
+        periods_per_year = config.periods_per_year
+        if periods_per_year is None and observation_based:
+            periods_per_year = float(TRADING_DAYS_PER_YEAR)
+        if periods_per_year is None:
+            periods_per_year = resolve_periods_per_year(
+                feed_spec.data_frequency,
+                calendar=config.resolved_calendar,
+            )
+        return cls(
+            periods_per_year_override=periods_per_year,
+            observation_based=observation_based,
+            initial_capital=config.initial_cash,
         )
-        return cls(periods_per_year_override=periods_per_year)
 
     def max_drawdown_info(self) -> tuple[float, int, int]:
         """Maximum drawdown with peak/trough indices."""
+        if self.initial_capital is not None:
+            drawdown, peak, trough = max_drawdown([self.initial_capital, *self.performance_values])
+            return drawdown, peak - 1, trough - 1
         return max_drawdown(self.values)
 
     @property
@@ -125,7 +168,7 @@ class EquityCurve:
     @property
     def cagr(self) -> float:
         """Compound Annual Growth Rate."""
-        return cagr(self.initial_value, self.final_value, self.years)
+        return cagr(self.initial_value, self.initial_value * (1 + self.total_return), self.years)
 
     @property
     def volatility(self) -> float:
@@ -155,10 +198,12 @@ class EquityCurve:
 
     def drawdown_series(self) -> np.ndarray:
         """Drawdown at each point (for underwater chart)."""
-        if len(self.values) < 2:
+        if not self.values:
             return np.array([])
-        arr = np.array(self.values)
+        arr = self.performance_values
         running_max = np.maximum.accumulate(arr)
+        if self.initial_capital is not None:
+            running_max = np.maximum(running_max, self.initial_capital)
         return (arr - running_max) / running_max
 
     def to_dict(self) -> dict:
